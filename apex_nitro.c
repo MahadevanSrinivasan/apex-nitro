@@ -1324,37 +1324,40 @@ static int g_car_vert_counts[6];
 static GLuint g_vbo_cars_cockpit[6];
 static int g_car_cockpit_vert_counts[6];
 
-static GLuint g_vbo_wheel = 0;
+static GLuint g_vbo_wheels[4] = {0, 0, 0, 0};
 static int g_wheel_vert_count = 0;
 
 static GLuint g_vbo_steering_wheel = 0;
 static int g_steering_vert_count = 0;
 
-static void build_wheel_vbo(void) {
-    MeshBuilder3D mb;
-    mesh3d_init(&mb, 4096);
-
+static void build_wheel_vbos(void) {
     float wR = 0.42f;
     float wW = 0.34f;
-    /* Outer Tire */
-    mesh3d_add_cylinder(&mb, 0.0f, 0.0f, 0.0f, wR, wR, wW, 20, vec3(0.09f, 0.10f, 0.12f), 0.0f, 0);
-    /* Rim Barrel */
-    mesh3d_add_cylinder(&mb, 0.0f, 0.0f, 0.0f, wR * 0.64f, wR * 0.64f, wW * 1.05f, 16, vec3(0.85f, 0.88f, 0.92f), 0.2f, 0);
-    /* Brake Rotor */
-    mesh3d_add_cylinder(&mb, -0.06f, 0.0f, 0.0f, wR * 0.55f, wR * 0.55f, 0.08f, 14, vec3(0.45f, 0.48f, 0.52f), 0.0f, 0);
-    /* 5 Rim Spokes */
-    for (int s = 0; s < 5; s++) {
-        float a = (float)s / 5.0f * (float)M_PI;
-        float c = cosf(a), sn = sinf(a);
-        float sx = 0.08f, sy = wR * 0.60f, sz = 0.05f;
-        mesh3d_add_box(&mb, 0.08f, 0.0f, 0.0f, sx, sy * 2.0f * c, sz * sn, vec3(0.85f, 0.88f, 0.92f), 0.3f);
-    }
-    /* Brake Caliper */
-    mesh3d_add_box(&mb, 0.06f, 0.18f, 0.12f, 0.14f, 0.16f, 0.22f, vec3(1.0f, 0.16f, 0.52f), 0.5f);
+    for (int rim = 0; rim < 4; rim++) {
+        MeshBuilder3D mb;
+        mesh3d_init(&mb, 4096);
+        Vec3 rimCol = g_rims[rim].col;
 
-    g_wheel_vert_count = mb.count;
-    g_vbo_wheel = mesh3d_create_vbo(&mb);
-    mesh3d_free(&mb);
+        /* Outer Tire */
+        mesh3d_add_cylinder(&mb, 0.0f, 0.0f, 0.0f, wR, wR, wW, 20, vec3(0.09f, 0.10f, 0.12f), 0.0f, 0);
+        /* Rim Barrel */
+        mesh3d_add_cylinder(&mb, 0.0f, 0.0f, 0.0f, wR * 0.64f, wR * 0.64f, wW * 1.05f, 16, rimCol, 0.2f, 0);
+        /* Brake Rotor */
+        mesh3d_add_cylinder(&mb, -0.06f, 0.0f, 0.0f, wR * 0.55f, wR * 0.55f, 0.08f, 14, vec3(0.45f, 0.48f, 0.52f), 0.0f, 0);
+        /* 5 Rim Spokes */
+        for (int s = 0; s < 5; s++) {
+            float a = (float)s / 5.0f * (float)M_PI;
+            float c = cosf(a), sn = sinf(a);
+            float sx = 0.08f, sy = wR * 0.60f, sz = 0.05f;
+            mesh3d_add_box(&mb, 0.08f, 0.0f, 0.0f, sx, sy * 2.0f * c, sz * sn, rimCol, 0.3f);
+        }
+        /* Brake Caliper */
+        mesh3d_add_box(&mb, 0.06f, 0.18f, 0.12f, 0.14f, 0.16f, 0.22f, vec3(1.0f, 0.16f, 0.52f), 0.5f);
+
+        g_wheel_vert_count = mb.count;
+        g_vbo_wheels[rim] = mesh3d_create_vbo(&mb);
+        mesh3d_free(&mb);
+    }
 }
 
 static void build_steering_wheel_vbo(void) {
@@ -1585,7 +1588,7 @@ static void build_single_car_mesh(int car_idx, bool for_cockpit, GLuint *out_vbo
 }
 
 static void build_all_cars(void) {
-    build_wheel_vbo();
+    build_wheel_vbos();
     build_steering_wheel_vbo();
     for (int i = 0; i < 6; i++) {
         build_single_car_mesh(i, false, &g_vbo_cars[i], &g_car_vert_counts[i]);
@@ -1658,6 +1661,11 @@ static int g_selected_mode = 0;
 static int g_cam_mode = 0; /* 0: Chase, 1: Cockpit, 2: Hood, 3: Heli */
 static bool g_mirror_on = true;
 
+static SDL_Joystick *g_joy = NULL;
+static int g_title_row = 0;   /* 0: Quick Race, 1: Tuner Speedshop, 2: Hot Pursuit, 3: Drift Touge */
+static int g_garage_row = 0;  /* 0..7 options in speedshop */
+static int g_final_rank = 1;  /* 1..6 finish position */
+
 static float g_countdown_timer = 3.2f;
 static int g_last_countdown_beep = 4;
 static float g_race_time = 0.0f;
@@ -1680,6 +1688,7 @@ static void reset_race(void) {
     g_active_drift_timer = 0.0f;
     g_active_drift_mult = 1;
     g_is_drafting = false;
+    g_final_rank = 1;
 
     /* Setup player */
     memset(&g_player, 0, sizeof(Racer));
@@ -1841,7 +1850,8 @@ static void render_car_mesh(const Racer *r, bool in_cockpit) {
     float wz = halfL * 0.62f;
     float wx = wid * 0.48f;
 
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo_wheel);
+    int rimIdx = (r->rim_idx >= 0 && r->rim_idx < 4) ? r->rim_idx : 0;
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo_wheels[rimIdx]);
     glEnableVertexAttribArray(g_a3d_Pos);
     glVertexAttribPointer(g_a3d_Pos, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), (void*)0);
     glEnableVertexAttribArray(g_a3d_Norm);
@@ -2139,6 +2149,25 @@ static void draw_hud_mirror_frame(void) {
 static void update_physics(float dt, const uint8_t *keys) {
     const TrackRuntime *tr = &g_tracks[g_selected_track];
 
+    float joySteer = 0.0f;
+    bool joyGas = false, joyBrake = false, joyDrift = false, joyNos = false;
+    if (g_joy) {
+        int16_t axisX = SDL_JoystickGetAxis(g_joy, 0);
+        if (abs(axisX) > 8000) {
+            joySteer = (float)axisX / 32767.0f;
+        }
+        uint8_t hat = SDL_JoystickGetHat(g_joy, 0);
+        if (hat & SDL_HAT_LEFT) joySteer = -1.0f;
+        if (hat & SDL_HAT_RIGHT) joySteer = 1.0f;
+        if (hat & SDL_HAT_UP) joyGas = true;
+        if (hat & SDL_HAT_DOWN) joyBrake = true;
+
+        if (SDL_JoystickGetButton(g_joy, 0) || SDL_JoystickGetButton(g_joy, 1)) joyGas = true;
+        if (SDL_JoystickGetButton(g_joy, 2)) joyBrake = true;
+        if (SDL_JoystickGetButton(g_joy, 3) || SDL_JoystickGetButton(g_joy, 4)) joyDrift = true;
+        if (SDL_JoystickGetButton(g_joy, 5)) joyNos = true;
+    }
+
     if (g_state == STATE_GARAGE) {
         g_garage_orbit_yaw += dt * 0.45f;
         return;
@@ -2152,7 +2181,7 @@ static void update_physics(float dt, const uint8_t *keys) {
         }
 
         /* Interactive RPM revving on grid */
-        bool gas = keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP];
+        bool gas = keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_X] || joyGas;
         float targetRpm = gas ? 8800.0f : 1200.0f;
         g_player.rpm += (targetRpm - g_player.rpm) * fminf(1.0f, dt * (gas ? 3.5f : 4.5f));
         g_audio_rpm_norm = g_player.rpm / 9000.0f;
@@ -2181,13 +2210,16 @@ static void update_physics(float dt, const uint8_t *keys) {
     /* Controls */
     bool steerL = keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT];
     bool steerR = keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT];
-    bool gas    = keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_X];
-    bool brake  = keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN];
-    bool drift  = keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_SPACE];
-    bool nos    = keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_LCTRL];
+    bool gas    = keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_X] || joyGas;
+    bool brake  = keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN] || joyBrake;
+    bool drift  = keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_B] || joyDrift;
+    bool nos    = keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_LCTRL] || joyNos;
 
     /* Steering */
     float targetSteer = (steerL ? -1.0f : 0.0f) + (steerR ? 1.0f : 0.0f);
+    if (fabsf(joySteer) > 0.01f) {
+        targetSteer = joySteer;
+    }
     g_player.steer_angle += (targetSteer - g_player.steer_angle) * fminf(1.0f, dt * 8.5f);
 
     /* Gearbox & Acceleration */
@@ -2278,6 +2310,13 @@ static void update_physics(float dt, const uint8_t *keys) {
             g_lap_start_time = g_race_time;
             if (lapDur < g_best_lap_time && lapDur > 5.0f) g_best_lap_time = lapDur;
             if (g_player.lap >= g_mode_specs[g_selected_mode].laps) {
+                int prank = 1;
+                float player_prog = (float)g_player.lap + g_player.u;
+                for (int i = 0; i < g_ai_count; i++) {
+                    float ai_prog = (float)g_ai[i].lap + g_ai[i].u;
+                    if (ai_prog > player_prog) prank++;
+                }
+                g_final_rank = prank;
                 g_state = STATE_RESULTS;
             }
         }
@@ -2293,7 +2332,10 @@ static void update_physics(float dt, const uint8_t *keys) {
         g_ai[i].speed += (g_ai[i].ai_target_speed - g_ai[i].speed) * dt * 0.8f;
         float aiDist = g_ai[i].speed * dt * 0.447f;
         g_ai[i].u += aiDist / tr->total_len;
-        if (g_ai[i].u >= 1.0f) g_ai[i].u -= 1.0f;
+        if (g_ai[i].u >= 1.0f) {
+            g_ai[i].u -= 1.0f;
+            g_ai[i].lap++;
+        }
 
         int ai_seg = (int)(g_ai[i].u * (float)FRAMES_COUNT);
         g_ai[i].seg_idx = ai_seg;
@@ -2355,44 +2397,43 @@ static void render_scene(int trk_idx) {
         memset(&showCar, 0, sizeof(Racer));
         showCar.car_idx = g_selected_car;
         showCar.paint_idx = g_selected_paint;
+        showCar.rim_idx = g_selected_rim;
         showCar.glow_idx = g_selected_glow;
         showCar.wing_idx = g_selected_wing;
         showCar.heading = g_garage_orbit_yaw * 0.5f;
         render_car_mesh(&showCar, false);
 
         /* Speedshop Customization HUD */
-        hud_pill(36.0f, 40.0f, 515.0f, 620.0f, 12.0f, vec4(0.04f, 0.07f, 0.12f, 0.90f));
+        hud_pill(36.0f, 40.0f, 520.0f, 620.0f, 12.0f, vec4(0.04f, 0.07f, 0.12f, 0.90f));
         hud_text(60.0f, 65.0f, 2.5f, "TUNER SPEEDSHOP", vec4(0.0f, 0.94f, 1.0f, 1.0f));
         hud_text(60.0f, 98.0f, 1.2f, "CUSTOMIZE YOUR RETRO SUPERCAR", vec4(0.75f, 0.85f, 0.95f, 0.85f));
 
         char line[64];
-        snprintf(line, sizeof(line), "1. SUPERCAR:  < %s >", g_car_specs[g_selected_car].name);
-        hud_text(60.0f, 150.0f, 1.4f, line, vec4(1.0f, 1.0f, 1.0f, 1.0f));
+        for (int r = 0; r < 8; r++) {
+            float ry = 142.0f + (float)r * 45.0f;
+            bool sel = (r == g_garage_row);
+            if (sel) {
+                hud_pill(50.0f, ry - 6.0f, 490.0f, 38.0f, 6.0f, vec4(0.0f, 0.94f, 1.0f, 0.28f));
+            }
+            const char *prefix = sel ? "> " : "  ";
+            Vec4 textCol = sel ? vec4(0.0f, 0.94f, 1.0f, 1.0f) : vec4(0.85f, 0.90f, 0.96f, 0.85f);
 
-        snprintf(line, sizeof(line), "2. PAINT:     < %s >", g_paints[g_selected_paint].name);
-        hud_text(60.0f, 195.0f, 1.4f, line, vec4(1.0f, 1.0f, 1.0f, 1.0f));
+            switch (r) {
+                case 0: snprintf(line, sizeof(line), "%s1. SUPERCAR:  < %s >", prefix, g_car_specs[g_selected_car].name); break;
+                case 1: snprintf(line, sizeof(line), "%s2. PAINT:     < %s >", prefix, g_paints[g_selected_paint].name); break;
+                case 2: snprintf(line, sizeof(line), "%s3. RIMS:      < %s >", prefix, g_rims[g_selected_rim].name); break;
+                case 3: snprintf(line, sizeof(line), "%s4. NEON GLOW: < %s >", prefix, g_glows[g_selected_glow].name); break;
+                case 4: snprintf(line, sizeof(line), "%s5. AERO WING: < %s >", prefix, g_wings[g_selected_wing]); break;
+                case 5: snprintf(line, sizeof(line), "%s6. GEARBOX:   < %s >", prefix, g_manual_trans ? "MANUAL (Q/E)" : "AUTOMATIC"); break;
+                case 6: snprintf(line, sizeof(line), "%s7. CIRCUIT:   < %s >", prefix, g_track_specs[g_selected_track].name); break;
+                case 7: snprintf(line, sizeof(line), "%s8. MODE:      < %s >", prefix, g_mode_specs[g_selected_mode].name); break;
+            }
+            hud_text(60.0f, ry, 1.35f, line, textCol);
+        }
 
-        snprintf(line, sizeof(line), "3. RIMS:      < %s >", g_rims[g_selected_rim].name);
-        hud_text(60.0f, 240.0f, 1.4f, line, vec4(1.0f, 1.0f, 1.0f, 1.0f));
-
-        snprintf(line, sizeof(line), "4. NEON GLOW: < %s >", g_glows[g_selected_glow].name);
-        hud_text(60.0f, 285.0f, 1.4f, line, vec4(1.0f, 1.0f, 1.0f, 1.0f));
-
-        snprintf(line, sizeof(line), "5. AERO WING: < %s >", g_wings[g_selected_wing]);
-        hud_text(60.0f, 330.0f, 1.4f, line, vec4(1.0f, 1.0f, 1.0f, 1.0f));
-
-        snprintf(line, sizeof(line), "6. GEARBOX:   < %s >", g_manual_trans ? "MANUAL (Q/E)" : "AUTOMATIC");
-        hud_text(60.0f, 375.0f, 1.4f, line, vec4(1.0f, 1.0f, 1.0f, 1.0f));
-
-        snprintf(line, sizeof(line), "7. CIRCUIT:   < %s >", g_track_specs[g_selected_track].name);
-        hud_text(60.0f, 420.0f, 1.4f, line, vec4(1.0f, 1.0f, 1.0f, 1.0f));
-
-        snprintf(line, sizeof(line), "8. MODE:      < %s >", g_mode_specs[g_selected_mode].name);
-        hud_text(60.0f, 465.0f, 1.4f, line, vec4(1.0f, 1.0f, 1.0f, 1.0f));
-
-        hud_pill(60.0f, 520.0f, 440.0f, 50.0f, 8.0f, vec4(0.0f, 0.94f, 1.0f, 0.25f));
-        hud_text(115.0f, 536.0f, 1.6f, "[ENTER / SPACE] START RACE", vec4(0.0f, 0.94f, 1.0f, 1.0f));
-        hud_text(60.0f, 595.0f, 1.2f, "[UP/DOWN] ROW  [LEFT/RIGHT] CYCLE  [ESC] TITLE", vec4(0.75f, 0.85f, 0.95f, 0.85f));
+        hud_pill(50.0f, 515.0f, 490.0f, 48.0f, 8.0f, vec4(0.0f, 0.94f, 1.0f, 0.25f));
+        hud_text(130.0f, 530.0f, 1.6f, "[ENTER / SPACE] START RACE", vec4(0.0f, 0.94f, 1.0f, 1.0f));
+        hud_text(55.0f, 580.0f, 1.15f, "[UP/DOWN] ROW   [LEFT/RIGHT] CYCLE   [1-8] SELECT   [ESC] TITLE", vec4(0.75f, 0.85f, 0.95f, 0.85f));
 
         flush_hud();
         return;
@@ -2404,13 +2445,22 @@ static void render_scene(int trk_idx) {
     float cosH = cosf(g_player.heading);
     bool isCockpit = (g_cam_mode == 1);
 
-    if (isCockpit) {
-        /* Unobstructed Cockpit Camera */
+    if (g_cam_mode == 1) {
+        /* Cockpit Camera */
         float rH = g_car_specs[g_player.car_idx].roof_h;
         float pX = g_car_specs[g_player.car_idx].roof_peak_x;
         float camZ = pX - 0.20f;
         camPos = vec3(g_player.x + sinH * camZ, g_player.y + rH - 0.10f, g_player.z + cosH * camZ);
         camTarget = vec3(g_player.x + sinH * 35.0f, g_player.y + rH - 0.30f, g_player.z + cosH * 35.0f);
+    } else if (g_cam_mode == 2) {
+        /* Hood / Bumper Camera */
+        float halfL = g_car_specs[g_player.car_idx].len * 0.5f;
+        camPos = vec3(g_player.x + sinH * (halfL * 0.70f), g_player.y + 0.85f, g_player.z + cosH * (halfL * 0.70f));
+        camTarget = vec3(g_player.x + sinH * 40.0f, g_player.y + 0.70f, g_player.z + cosH * 40.0f);
+    } else if (g_cam_mode == 3) {
+        /* High Heli Camera */
+        camPos = vec3(g_player.x - sinH * 18.0f, g_player.y + 12.0f, g_player.z - cosH * 18.0f);
+        camTarget = vec3(g_player.x + sinH * 8.0f, g_player.y + 0.5f, g_player.z + cosH * 8.0f);
     } else {
         /* Third-Person Chase Camera */
         camPos = vec3(g_player.x - sinH * 8.5f, g_player.y + 3.2f, g_player.z - cosH * 8.5f);
@@ -2453,26 +2503,72 @@ static void render_scene(int trk_idx) {
         hud_text(65.0f, 75.0f, 3.2f, "APEX NITRO 3D", vec4(0.0f, 0.94f, 1.0f, 1.0f));
         hud_text(65.0f, 115.0f, 1.2f, "GLES2 RETROPIE EDITION - 60 FPS", vec4(1.0f, 0.16f, 0.52f, 1.0f));
 
-        /* Menu Options */
-        hud_pill(65.0f, 180.0f, 380.0f, 52.0f, 8.0f, vec4(0.0f, 0.94f, 1.0f, 0.35f));
-        hud_text(90.0f, 196.0f, 1.8f, "1. QUICK RACE", vec4(1.0f, 1.0f, 1.0f, 1.0f));
+        /* Menu Options with dynamic row highlight */
+        static const char *title_items[4] = {
+            "1. QUICK RACE",
+            "2. TUNER SPEEDSHOP",
+            "3. HOT PURSUIT",
+            "4. DRIFT TOUGE"
+        };
+        for (int r = 0; r < 4; r++) {
+            float py = 180.0f + (float)r * 70.0f;
+            bool sel = (r == g_title_row);
+            Vec4 pCol = sel ? vec4(0.0f, 0.94f, 1.0f, 0.35f) : vec4(0.12f, 0.16f, 0.23f, 0.85f);
+            Vec4 tCol = sel ? vec4(1.0f, 1.0f, 1.0f, 1.0f) : vec4(0.80f, 0.85f, 0.90f, 0.90f);
+            hud_pill(65.0f, py, 380.0f, 52.0f, 8.0f, pCol);
+            hud_text(90.0f, py + 16.0f, 1.8f, title_items[r], tCol);
+        }
 
-        hud_pill(65.0f, 250.0f, 380.0f, 52.0f, 8.0f, vec4(0.12f, 0.16f, 0.23f, 0.85f));
-        hud_text(90.0f, 266.0f, 1.8f, "2. TUNER SPEEDSHOP", vec4(0.9f, 0.9f, 0.9f, 1.0f));
-
-        hud_pill(65.0f, 320.0f, 380.0f, 52.0f, 8.0f, vec4(0.12f, 0.16f, 0.23f, 0.85f));
-        hud_text(90.0f, 336.0f, 1.8f, "3. HOT PURSUIT", vec4(0.9f, 0.9f, 0.9f, 1.0f));
-
-        hud_pill(65.0f, 390.0f, 380.0f, 52.0f, 8.0f, vec4(0.12f, 0.16f, 0.23f, 0.85f));
-        hud_text(90.0f, 406.0f, 1.8f, "4. DRIFT TOUGE", vec4(0.9f, 0.9f, 0.9f, 1.0f));
-
-        hud_text(65.0f, 520.0f, 1.2f, "[ENTER] SELECT   [ARROWS] NAVIGATE", vec4(0.75f, 0.85f, 0.95f, 0.85f));
+        hud_text(65.0f, 480.0f, 1.2f, "[UP/DOWN] NAVIGATE   [ENTER/SPACE/X] SELECT", vec4(0.0f, 0.94f, 1.0f, 0.95f));
+        hud_text(65.0f, 510.0f, 1.2f, "[1-4] DIRECT QUICK SELECT", vec4(0.75f, 0.85f, 0.95f, 0.85f));
         hud_text(65.0f, 550.0f, 1.2f, "[RIGHT SHIFT + ENTER] QUIT TO RETROPIE", vec4(1.0f, 0.45f, 0.45f, 0.95f));
 
         /* Top-Right Live Street Cam badge */
         hud_pill(960.0f, 30.0f, 280.0f, 38.0f, 6.0f, vec4(0.04f, 0.07f, 0.12f, 0.85f));
         hud_rect(980.0f, 44.0f, 10.0f, 10.0f, vec4(1.0f, 0.16f, 0.2f, 1.0f));
         hud_text(1005.0f, 42.0f, 1.4f, "LIVE STREET CAM", vec4(0.0f, 0.94f, 1.0f, 1.0f));
+    } else if (g_state == STATE_RESULTS) {
+        /* Finish Card Overlay */
+        hud_pill(300.0f, 100.0f, 680.0f, 520.0f, 16.0f, vec4(0.04f, 0.07f, 0.12f, 0.92f));
+
+        if (g_final_rank == 1) {
+            hud_text(495.0f, 140.0f, 3.2f, "VICTORY!", vec4(0.98f, 0.80f, 0.08f, 1.0f));
+        } else {
+            hud_text(450.0f, 140.0f, 3.2f, "RACE FINISHED", vec4(0.0f, 0.94f, 1.0f, 1.0f));
+        }
+        hud_text(500.0f, 195.0f, 1.3f, "OFFICIAL RACE RESULTS", vec4(0.75f, 0.85f, 0.95f, 0.85f));
+        hud_rect(340.0f, 225.0f, 600.0f, 2.0f, vec4(0.0f, 0.94f, 1.0f, 0.40f));
+
+        static const char *ords[] = { "1ST", "2ND", "3RD", "4TH", "5TH", "6TH" };
+        int rIdx = (g_final_rank >= 1 && g_final_rank <= 6) ? g_final_rank - 1 : 0;
+        char rankBuf[64];
+        snprintf(rankBuf, sizeof(rankBuf), "FINAL POSITION:    %s / %d", ords[rIdx], 1 + g_ai_count);
+        hud_text(360.0f, 260.0f, 1.8f, rankBuf, (g_final_rank == 1) ? vec4(0.98f, 0.80f, 0.08f, 1.0f) : vec4(1.0f, 1.0f, 1.0f, 1.0f));
+
+        int min = (int)(g_race_time / 60.0f);
+        int sec = (int)fmodf(g_race_time, 60.0f);
+        int cs  = (int)fmodf(g_race_time * 100.0f, 100.0f);
+        char timeBuf[64];
+        snprintf(timeBuf, sizeof(timeBuf), "ELAPSED TIME:      %02d:%02d.%02d", min, sec, cs);
+        hud_text(360.0f, 310.0f, 1.8f, timeBuf, vec4(0.85f, 0.90f, 0.98f, 1.0f));
+
+        char bestBuf[64];
+        if (g_best_lap_time < 9000.0f) {
+            int bmin = (int)(g_best_lap_time / 60.0f);
+            int bsec = (int)fmodf(g_best_lap_time, 60.0f);
+            int bcs  = (int)fmodf(g_best_lap_time * 100.0f, 100.0f);
+            snprintf(bestBuf, sizeof(bestBuf), "BEST LAP:          %02d:%02d.%02d", bmin, bsec, bcs);
+        } else {
+            snprintf(bestBuf, sizeof(bestBuf), "BEST LAP:          --:--.--");
+        }
+        hud_text(360.0f, 360.0f, 1.8f, bestBuf, vec4(0.0f, 0.94f, 1.0f, 1.0f));
+
+        char scoreBuf[64];
+        snprintf(scoreBuf, sizeof(scoreBuf), "STYLE SCORE:       %d PTS", g_total_style_score);
+        hud_text(360.0f, 410.0f, 1.8f, scoreBuf, vec4(1.0f, 0.16f, 0.52f, 1.0f));
+
+        hud_pill(340.0f, 480.0f, 600.0f, 56.0f, 8.0f, vec4(0.0f, 0.94f, 1.0f, 0.25f));
+        hud_text(360.0f, 500.0f, 1.25f, "[ENTER / SPACE] RACE AGAIN   [G] SPEEDSHOP   [ESC] TITLE", vec4(0.0f, 0.94f, 1.0f, 1.0f));
     } else {
         /* Racing / Countdown HUD */
         if (g_mirror_on) draw_hud_mirror_frame();
@@ -2480,9 +2576,23 @@ static void render_scene(int trk_idx) {
         draw_hud_tachometer(1140.0f, 580.0f, 85.0f, g_player.rpm, g_player.gear, g_manual_trans,
                             fabsf(g_player.speed), g_player.n2o, g_player.nos_active, (g_state == STATE_COUNTDOWN));
 
+        /* Compute player live rank (1..6) vs AI rivals */
+        int live_rank = 1;
+        float player_prog = (float)g_player.lap + g_player.u;
+        for (int i = 0; i < g_ai_count; i++) {
+            float ai_prog = (float)g_ai[i].lap + g_ai[i].u;
+            if (ai_prog > player_prog) live_rank++;
+        }
+        g_final_rank = live_rank;
+
         /* Top-Left Race Stats Card */
         hud_pill(36.0f, 20.0f, 335.0f, 80.0f, 8.0f, vec4(0.04f, 0.07f, 0.12f, 0.85f));
-        hud_text(55.0f, 34.0f, 2.2f, "1ST / 6", vec4(0.98f, 0.80f, 0.08f, 1.0f));
+        char rankStr[32];
+        static const char *ords[] = { "1ST", "2ND", "3RD", "4TH", "5TH", "6TH" };
+        int rIdx = (live_rank >= 1 && live_rank <= 6) ? live_rank - 1 : 0;
+        snprintf(rankStr, sizeof(rankStr), "%s / %d", ords[rIdx], 1 + g_ai_count);
+        hud_text(55.0f, 34.0f, 2.2f, rankStr, (live_rank == 1) ? vec4(0.98f, 0.80f, 0.08f, 1.0f) : vec4(0.0f, 0.94f, 1.0f, 1.0f));
+
         char lapStr[32];
         snprintf(lapStr, sizeof(lapStr), "LAP %d / %d", g_player.lap + 1, g_mode_specs[g_selected_mode].laps);
         hud_text(206.0f, 36.0f, 1.5f, lapStr, vec4(0.0f, 0.94f, 1.0f, 1.0f));
@@ -2737,7 +2847,7 @@ int main(int argc, char **argv) {
     SDL_ShowCursor(SDL_DISABLE);
 
     if (SDL_NumJoysticks() > 0) {
-        SDL_JoystickOpen(0);
+        g_joy = SDL_JoystickOpen(0);
     }
 
     /* GLES 2.0 Context Setup */
@@ -2852,50 +2962,184 @@ int main(int argc, char **argv) {
                 }
 
                 if (g_state == STATE_TITLE) {
-                    if (sym == SDLK_1 || sym == SDLK_RETURN || sym == SDLK_SPACE) {
+                    if (sym == SDLK_UP) {
+                        g_title_row = (g_title_row + 3) % 4;
+                    } else if (sym == SDLK_DOWN) {
+                        g_title_row = (g_title_row + 1) % 4;
+                    } else if (sym == SDLK_RETURN || sym == SDLK_KP_ENTER || sym == SDLK_SPACE || sym == SDLK_x) {
+                        if (g_title_row == 0) {
+                            g_selected_mode = 0;
+                            g_state = STATE_COUNTDOWN;
+                            reset_race();
+                        } else if (g_title_row == 1) {
+                            g_state = STATE_GARAGE;
+                        } else if (g_title_row == 2) {
+                            g_selected_mode = 2;
+                            g_state = STATE_COUNTDOWN;
+                            reset_race();
+                        } else if (g_title_row == 3) {
+                            g_selected_mode = 1;
+                            g_state = STATE_COUNTDOWN;
+                            reset_race();
+                        }
+                    } else if (sym == SDLK_1) {
+                        g_title_row = 0;
+                        g_selected_mode = 0;
                         g_state = STATE_COUNTDOWN;
                         reset_race();
                     } else if (sym == SDLK_2) {
+                        g_title_row = 1;
                         g_state = STATE_GARAGE;
                     } else if (sym == SDLK_3) {
+                        g_title_row = 2;
                         g_selected_mode = 2;
                         g_state = STATE_COUNTDOWN;
                         reset_race();
                     } else if (sym == SDLK_4) {
+                        g_title_row = 3;
                         g_selected_mode = 1;
                         g_state = STATE_COUNTDOWN;
                         reset_race();
                     }
                 } else if (g_state == STATE_GARAGE) {
-                    if (sym == SDLK_RETURN || sym == SDLK_SPACE || sym == SDLK_x) {
+                    if (sym == SDLK_UP) {
+                        g_garage_row = (g_garage_row + 7) % 8;
+                    } else if (sym == SDLK_DOWN) {
+                        g_garage_row = (g_garage_row + 1) % 8;
+                    } else if (sym == SDLK_LEFT) {
+                        switch (g_garage_row) {
+                            case 0: g_selected_car = (g_selected_car + 5) % 6; break;
+                            case 1: g_selected_paint = (g_selected_paint + 7) % 8; break;
+                            case 2: g_selected_rim = (g_selected_rim + 3) % 4; break;
+                            case 3: g_selected_glow = (g_selected_glow + 6) % 7; break;
+                            case 4: g_selected_wing = (g_selected_wing + 3) % 4; break;
+                            case 5: g_manual_trans = !g_manual_trans; break;
+                            case 6: g_selected_track = (g_selected_track + 2) % 3; break;
+                            case 7: g_selected_mode = (g_selected_mode + 2) % 3; break;
+                        }
+                    } else if (sym == SDLK_RIGHT) {
+                        switch (g_garage_row) {
+                            case 0: g_selected_car = (g_selected_car + 1) % 6; break;
+                            case 1: g_selected_paint = (g_selected_paint + 1) % 8; break;
+                            case 2: g_selected_rim = (g_selected_rim + 1) % 4; break;
+                            case 3: g_selected_glow = (g_selected_glow + 1) % 7; break;
+                            case 4: g_selected_wing = (g_selected_wing + 1) % 4; break;
+                            case 5: g_manual_trans = !g_manual_trans; break;
+                            case 6: g_selected_track = (g_selected_track + 1) % 3; break;
+                            case 7: g_selected_mode = (g_selected_mode + 1) % 3; break;
+                        }
+                    } else if (sym == SDLK_RETURN || sym == SDLK_KP_ENTER || sym == SDLK_SPACE || sym == SDLK_x) {
                         g_state = STATE_COUNTDOWN;
                         reset_race();
                     } else if (sym == SDLK_1) {
                         g_selected_car = (g_selected_car + 1) % 6;
+                        g_garage_row = 0;
                     } else if (sym == SDLK_2) {
                         g_selected_paint = (g_selected_paint + 1) % 8;
+                        g_garage_row = 1;
                     } else if (sym == SDLK_3) {
                         g_selected_rim = (g_selected_rim + 1) % 4;
+                        g_garage_row = 2;
                     } else if (sym == SDLK_4) {
                         g_selected_glow = (g_selected_glow + 1) % 7;
+                        g_garage_row = 3;
                     } else if (sym == SDLK_5) {
                         g_selected_wing = (g_selected_wing + 1) % 4;
+                        g_garage_row = 4;
+                    } else if (sym == SDLK_6) {
+                        g_manual_trans = !g_manual_trans;
+                        g_garage_row = 5;
                     } else if (sym == SDLK_7) {
                         g_selected_track = (g_selected_track + 1) % 3;
+                        g_garage_row = 6;
                     } else if (sym == SDLK_8) {
                         g_selected_mode = (g_selected_mode + 1) % 3;
+                        g_garage_row = 7;
                     }
                 } else if (g_state == STATE_RESULTS) {
-                    if (sym == SDLK_RETURN || sym == SDLK_SPACE) {
+                    if (sym == SDLK_RETURN || sym == SDLK_KP_ENTER || sym == SDLK_SPACE) {
                         g_state = STATE_COUNTDOWN;
                         reset_race();
+                    } else if (sym == SDLK_g) {
+                        g_state = STATE_GARAGE;
+                    }
+                }
+            } else if (ev.type == SDL_JOYHATMOTION) {
+                if (ev.jhat.value & SDL_HAT_UP) {
+                    if (g_state == STATE_TITLE) {
+                        g_title_row = (g_title_row + 3) % 4;
+                    } else if (g_state == STATE_GARAGE) {
+                        g_garage_row = (g_garage_row + 7) % 8;
+                    }
+                } else if (ev.jhat.value & SDL_HAT_DOWN) {
+                    if (g_state == STATE_TITLE) {
+                        g_title_row = (g_title_row + 1) % 4;
+                    } else if (g_state == STATE_GARAGE) {
+                        g_garage_row = (g_garage_row + 1) % 8;
+                    }
+                } else if (ev.jhat.value & SDL_HAT_LEFT) {
+                    if (g_state == STATE_GARAGE) {
+                        switch (g_garage_row) {
+                            case 0: g_selected_car = (g_selected_car + 5) % 6; break;
+                            case 1: g_selected_paint = (g_selected_paint + 7) % 8; break;
+                            case 2: g_selected_rim = (g_selected_rim + 3) % 4; break;
+                            case 3: g_selected_glow = (g_selected_glow + 6) % 7; break;
+                            case 4: g_selected_wing = (g_selected_wing + 3) % 4; break;
+                            case 5: g_manual_trans = !g_manual_trans; break;
+                            case 6: g_selected_track = (g_selected_track + 2) % 3; break;
+                            case 7: g_selected_mode = (g_selected_mode + 2) % 3; break;
+                        }
+                    }
+                } else if (ev.jhat.value & SDL_HAT_RIGHT) {
+                    if (g_state == STATE_GARAGE) {
+                        switch (g_garage_row) {
+                            case 0: g_selected_car = (g_selected_car + 1) % 6; break;
+                            case 1: g_selected_paint = (g_selected_paint + 1) % 8; break;
+                            case 2: g_selected_rim = (g_selected_rim + 1) % 4; break;
+                            case 3: g_selected_glow = (g_selected_glow + 1) % 7; break;
+                            case 4: g_selected_wing = (g_selected_wing + 1) % 4; break;
+                            case 5: g_manual_trans = !g_manual_trans; break;
+                            case 6: g_selected_track = (g_selected_track + 1) % 3; break;
+                            case 7: g_selected_mode = (g_selected_mode + 1) % 3; break;
+                        }
                     }
                 }
             } else if (ev.type == SDL_JOYBUTTONDOWN) {
                 /* RetroPie Gamepad Quick Quit: Start + Select */
-                if ((SDL_JoystickGetButton(0, 6) && SDL_JoystickGetButton(0, 7)) ||
-                    (SDL_JoystickGetButton(0, 8) && SDL_JoystickGetButton(0, 9))) {
+                if (g_joy && ((SDL_JoystickGetButton(g_joy, 6) && SDL_JoystickGetButton(g_joy, 7)) ||
+                              (SDL_JoystickGetButton(g_joy, 8) && SDL_JoystickGetButton(g_joy, 9)))) {
                     running = false;
+                }
+                uint8_t btn = ev.jbutton.button;
+                if (btn == 0 || btn == 1 || btn == 7 || btn == 9) {
+                    if (g_state == STATE_TITLE) {
+                        if (g_title_row == 0) {
+                            g_selected_mode = 0;
+                            g_state = STATE_COUNTDOWN;
+                            reset_race();
+                        } else if (g_title_row == 1) {
+                            g_state = STATE_GARAGE;
+                        } else if (g_title_row == 2) {
+                            g_selected_mode = 2;
+                            g_state = STATE_COUNTDOWN;
+                            reset_race();
+                        } else if (g_title_row == 3) {
+                            g_selected_mode = 1;
+                            g_state = STATE_COUNTDOWN;
+                            reset_race();
+                        }
+                    } else if (g_state == STATE_GARAGE) {
+                        g_state = STATE_COUNTDOWN;
+                        reset_race();
+                    } else if (g_state == STATE_RESULTS) {
+                        g_state = STATE_COUNTDOWN;
+                        reset_race();
+                    }
+                }
+                if (btn == 4 && g_manual_trans && g_player.gear > 1) {
+                    g_player.gear--;
+                } else if (btn == 5 && g_manual_trans && g_player.gear < 6) {
+                    g_player.gear++;
                 }
             }
         }
@@ -2907,6 +3151,10 @@ int main(int argc, char **argv) {
         SDL_GL_SwapWindow(window);
     }
 
+    if (g_joy) {
+        SDL_JoystickClose(g_joy);
+        g_joy = NULL;
+    }
     SDL_CloseAudio();
     SDL_GL_DeleteContext(gl_ctx);
     SDL_DestroyWindow(window);
