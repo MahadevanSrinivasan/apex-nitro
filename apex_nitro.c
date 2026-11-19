@@ -350,6 +350,7 @@ static const char *s_vs_3d =
     "attribute float aGlow;\n"
     "uniform mat4 uMVP;\n"
     "uniform mat4 uModel;\n"
+    "uniform vec3 uPaintCol;\n"
     "varying vec3 vWorldPos;\n"
     "varying vec3 vNorm;\n"
     "varying vec3 vCol;\n"
@@ -358,8 +359,9 @@ static const char *s_vs_3d =
     "    vec4 wp = uModel * vec4(aPos, 1.0);\n"
     "    vWorldPos = wp.xyz;\n"
     "    vNorm = mat3(uModel[0].xyz, uModel[1].xyz, uModel[2].xyz) * aNorm;\n"
-    "    vCol = aCol;\n"
-    "    vGlow = aGlow;\n"
+    "    float paintMask = step(aGlow, -0.5);\n"
+    "    vCol = mix(aCol, uPaintCol, paintMask);\n"
+    "    vGlow = max(aGlow, 0.0);\n"
     "    gl_Position = uMVP * wp;\n"
     "}\n";
 
@@ -384,8 +386,8 @@ static const char *s_fs_3d =
     "    vec3 light = uAmbientCol * hemi + uSunCol * nDotL;\n"
     "    vec3 R = reflect(-V, N);\n"
     "    float spec = pow(max(dot(R, L), 0.0), 16.0) * 0.45;\n"
-    "    float fresnel = pow(clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0), 3.0) * 0.35;\n"
-    "    vec3 lit = mix(vCol * light + vec3(spec + fresnel), vCol * 1.5, vGlow);\n"
+    "    float fresnel = pow(clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0), 3.0) * 0.16;\n"
+    "    vec3 lit = mix(vCol * light + uSunCol * (spec + fresnel), vCol * 1.5, vGlow);\n"
     "    float dist = length(uCamPos - vWorldPos);\n"
     "    float fogFactor = clamp(1.0 - exp(-dist * uFogDensity), 0.0, 1.0);\n"
     "    vec3 finalCol = mix(lit, uFogCol, fogFactor);\n"
@@ -446,6 +448,35 @@ static const char *s_fs_hud =
     "    gl_FragColor = col;\n"
     "}\n";
 
+static const char *s_vs_sky =
+    "precision mediump float;\n"
+    "attribute vec2 aPos;\n"
+    "varying vec2 vScreen;\n"
+    "void main() {\n"
+    "    vScreen = aPos * 0.5 + 0.5;\n"
+    "    gl_Position = vec4(aPos, 0.9999, 1.0);\n"
+    "}\n";
+
+static const char *s_fs_sky =
+    "precision mediump float;\n"
+    "varying vec2 vScreen;\n"
+    "uniform vec3 uSkyZenith;\n"
+    "uniform vec3 uSkyHorizon;\n"
+    "uniform vec3 uSkyBandColA;\n"
+    "uniform vec3 uSkyBandColB;\n"
+    "uniform float uSkyBandStr;\n"
+    "void main() {\n"
+    "    float h = clamp((vScreen.y - 0.42) / 0.58, 0.0, 1.0);\n"
+    "    float curve = h * (1.55 - 0.55 * h);\n"
+    "    vec3 col = mix(uSkyHorizon, uSkyZenith, curve);\n"
+    "    float dy = (vScreen.y - 0.51) * 9.5;\n"
+    "    float band = exp(-dy * dy);\n"
+    "    float wave = 0.5 + 0.5 * sin(vScreen.x * 3.14159);\n"
+    "    vec3 bandCol = mix(uSkyBandColA, uSkyBandColB, wave);\n"
+    "    col += bandCol * band * uSkyBandStr;\n"
+    "    gl_FragColor = vec4(col, 1.0);\n"
+    "}\n";
+
 static GLuint compile_shader(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
     glShaderSource(s, 1, &src, NULL);
@@ -482,7 +513,7 @@ static GLuint link_program(GLuint vs, GLuint fs) {
 
 /* Shader program handles */
 static GLuint g_prog3d = 0;
-static GLint g_u3d_MVP = -1, g_u3d_Model = -1, g_u3d_CamPos = -1;
+static GLint g_u3d_MVP = -1, g_u3d_Model = -1, g_u3d_CamPos = -1, g_u3d_PaintCol = -1;
 static GLint g_u3d_SunDir = -1, g_u3d_SunCol = -1, g_u3d_AmbientCol = -1;
 static GLint g_u3d_FogCol = -1, g_u3d_FogDensity = -1;
 static GLint g_a3d_Pos = -1, g_a3d_Norm = -1, g_a3d_Col = -1, g_a3d_Glow = -1;
@@ -495,6 +526,12 @@ static GLuint g_progHud = 0;
 static GLint g_uHud_Ortho = -1, g_uHud_Tex = -1;
 static GLint g_aHud_Pos = -1, g_aHud_UV = -1, g_aHud_Col = -1, g_aHud_TexMix = -1;
 
+static GLuint g_progSky = 0;
+static GLuint g_vbo_sky = 0;
+static GLint g_aSky_Pos = -1;
+static GLint g_uSky_Zenith = -1, g_uSky_Horizon = -1;
+static GLint g_uSky_BandColA = -1, g_uSky_BandColB = -1, g_uSky_BandStr = -1;
+
 static bool init_shaders(void) {
     GLuint vs3d = compile_shader(GL_VERTEX_SHADER, s_vs_3d);
     GLuint fs3d = compile_shader(GL_FRAGMENT_SHADER, s_fs_3d);
@@ -504,6 +541,7 @@ static bool init_shaders(void) {
     g_u3d_MVP = glGetUniformLocation(g_prog3d, "uMVP");
     g_u3d_Model = glGetUniformLocation(g_prog3d, "uModel");
     g_u3d_CamPos = glGetUniformLocation(g_prog3d, "uCamPos");
+    g_u3d_PaintCol = glGetUniformLocation(g_prog3d, "uPaintCol");
     g_u3d_SunDir = glGetUniformLocation(g_prog3d, "uSunDir");
     g_u3d_SunCol = glGetUniformLocation(g_prog3d, "uSunCol");
     g_u3d_AmbientCol = glGetUniformLocation(g_prog3d, "uAmbientCol");
@@ -536,7 +574,72 @@ static bool init_shaders(void) {
     g_aHud_Col = glGetAttribLocation(g_progHud, "aCol");
     g_aHud_TexMix = glGetAttribLocation(g_progHud, "aTexMix");
 
-    return (g_prog3d && g_progFx && g_progHud);
+    GLuint vsSky = compile_shader(GL_VERTEX_SHADER, s_vs_sky);
+    GLuint fsSky = compile_shader(GL_FRAGMENT_SHADER, s_fs_sky);
+    g_progSky = link_program(vsSky, fsSky);
+    glDeleteShader(vsSky); glDeleteShader(fsSky);
+
+    g_aSky_Pos = glGetAttribLocation(g_progSky, "aPos");
+    g_uSky_Zenith = glGetUniformLocation(g_progSky, "uSkyZenith");
+    g_uSky_Horizon = glGetUniformLocation(g_progSky, "uSkyHorizon");
+    g_uSky_BandColA = glGetUniformLocation(g_progSky, "uSkyBandColA");
+    g_uSky_BandColB = glGetUniformLocation(g_progSky, "uSkyBandColB");
+    g_uSky_BandStr = glGetUniformLocation(g_progSky, "uSkyBandStr");
+
+    static const float sky_quad[12] = {
+        -1.0f, -1.0f,  1.0f, -1.0f,  1.0f,  1.0f,
+        -1.0f, -1.0f,  1.0f,  1.0f, -1.0f,  1.0f
+    };
+    glGenBuffers(1, &g_vbo_sky);
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo_sky);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(sky_quad), sky_quad, GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    return (g_prog3d && g_progFx && g_progHud && g_progSky);
+}
+
+static void render_sky_gradient(int trk_idx) {
+    Vec3 zenith, horizon, bandA, bandB;
+    float bandStr;
+    if (trk_idx == 1) { /* Canyon: deep twilight violet -> sunset coral-orange */
+        zenith  = vec3(0.043f, 0.035f, 0.125f); /* #0b0920 */
+        horizon = vec3(0.918f, 0.345f, 0.047f); /* #ea580c */
+        bandA   = vec3(0.980f, 0.450f, 0.120f);
+        bandB   = vec3(1.000f, 0.680f, 0.250f);
+        bandStr = 0.20f;
+    } else if (trk_idx == 2) { /* Alpine: Nordic navy -> arctic ice-cyan */
+        zenith  = vec3(0.027f, 0.075f, 0.161f); /* #071329 */
+        horizon = vec3(0.220f, 0.741f, 0.973f); /* #38bdf8 */
+        bandA   = vec3(0.450f, 0.860f, 1.000f);
+        bandB   = vec3(0.700f, 0.940f, 1.000f);
+        bandStr = 0.14f;
+    } else { /* Tokyo: midnight obsidian -> indigo-navy + subtle cyan/amber city glow */
+        zenith  = vec3(0.008f, 0.020f, 0.051f); /* #02050d */
+        horizon = vec3(0.051f, 0.106f, 0.227f); /* #0d1b3a */
+        bandA   = vec3(0.000f, 0.750f, 0.920f); /* cyan glow */
+        bandB   = vec3(0.950f, 0.520f, 0.120f); /* amber city haze */
+        bandStr = 0.18f;
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+
+    glUseProgram(g_progSky);
+    glUniform3f(g_uSky_Zenith, zenith.x, zenith.y, zenith.z);
+    glUniform3f(g_uSky_Horizon, horizon.x, horizon.y, horizon.z);
+    glUniform3f(g_uSky_BandColA, bandA.x, bandA.y, bandA.z);
+    glUniform3f(g_uSky_BandColB, bandB.x, bandB.y, bandB.z);
+    glUniform1f(g_uSky_BandStr, bandStr);
+
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo_sky);
+    glEnableVertexAttribArray(g_aSky_Pos);
+    glVertexAttribPointer(g_aSky_Pos, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glDisableVertexAttribArray(g_aSky_Pos);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
 }
 
 /* =========================================================================
@@ -714,6 +817,39 @@ static void hud_pill(float x, float y, float w, float h, float slant, Vec4 col) 
     VertexHUD v3 = { x - slant,     y + h, 0.0f, 0.0f, col.x, col.y, col.z, col.w, 0.0f };
     hud_push_v(v0); hud_push_v(v1); hud_push_v(v2);
     hud_push_v(v0); hud_push_v(v2); hud_push_v(v3);
+}
+
+static void hud_line(float x0, float y0, float x1, float y1, float thickness, Vec4 col) {
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 1e-4f) return;
+    float nx = (-dy / len) * (thickness * 0.5f);
+    float ny = ( dx / len) * (thickness * 0.5f);
+    VertexHUD v0 = { x0 + nx, y0 + ny, 0.0f, 0.0f, col.x, col.y, col.z, col.w, 0.0f };
+    VertexHUD v1 = { x1 + nx, y1 + ny, 0.0f, 0.0f, col.x, col.y, col.z, col.w, 0.0f };
+    VertexHUD v2 = { x1 - nx, y1 - ny, 0.0f, 0.0f, col.x, col.y, col.z, col.w, 0.0f };
+    VertexHUD v3 = { x0 - nx, y0 - ny, 0.0f, 0.0f, col.x, col.y, col.z, col.w, 0.0f };
+    hud_push_v(v0); hud_push_v(v1); hud_push_v(v2);
+    hud_push_v(v0); hud_push_v(v2); hud_push_v(v3);
+}
+
+static void hud_card(float x, float y, float w, float h, float slant,
+                     Vec4 fillCol, Vec4 borderCol, Vec4 topAccentCol) {
+    hud_pill(x, y, w, h, slant, fillCol);
+    if (borderCol.w > 0.01f) {
+        float x0 = x + slant, y0 = y;
+        float x1 = x + w + slant, y1 = y;
+        float x2 = x + w - slant, y2 = y + h;
+        float x3 = x - slant, y3 = y + h;
+        hud_line(x0, y0, x1, y1, 1.5f, borderCol);
+        hud_line(x1, y1, x2, y2, 1.5f, borderCol);
+        hud_line(x2, y2, x3, y3, 1.5f, borderCol);
+        hud_line(x3, y3, x0, y0, 1.5f, borderCol);
+    }
+    if (topAccentCol.w > 0.01f) {
+        hud_pill(x + slant, y, w, 2.5f, 0.0f, topAccentCol);
+    }
 }
 
 static void hud_text(float x, float y, float scale, const char *str, Vec4 col) {
@@ -934,7 +1070,7 @@ typedef struct {
 static const TrackSpec g_track_specs[3] = {
     {
         "tokyo", "Tokyo Neon Underground", "Wet reflections, falling rain, streetlights & neon tunnels",
-        {0.02f, 0.04f, 0.09f}, {0.03f, 0.05f, 0.13f}, 0.00135f,
+        {0.008f, 0.020f, 0.051f}, {0.045f, 0.095f, 0.205f}, 0.00175f,
         {0.29f, 0.39f, 0.60f}, {0.50f, 0.71f, 1.00f}, {0.00f, 0.94f, 1.00f},
         25,
         {
@@ -947,7 +1083,7 @@ static const TrackSpec g_track_specs[3] = {
     },
     {
         "canyon", "Pacific Sunset Canyon", "Golden coastal cliffs, terracotta mesas & rock tunnels",
-        {0.98f, 0.48f, 0.31f}, {0.96f, 0.52f, 0.37f}, 0.00085f,
+        {0.043f, 0.035f, 0.125f}, {0.880f, 0.350f, 0.110f}, 0.00085f,
         {1.00f, 0.83f, 0.72f}, {1.00f, 0.82f, 0.40f}, {1.00f, 0.67f, 0.00f},
         20,
         {
@@ -959,7 +1095,7 @@ static const TrackSpec g_track_specs[3] = {
     },
     {
         "alpine", "Alpine Horizon Speedway", "Crisp daylight high-speed chicanes, pines & snowy peaks",
-        {0.22f, 0.74f, 0.97f}, {0.58f, 0.77f, 0.99f}, 0.00062f,
+        {0.027f, 0.075f, 0.161f}, {0.240f, 0.680f, 0.920f}, 0.00062f,
         {0.86f, 0.92f, 1.00f}, {1.00f, 0.98f, 0.92f}, {0.22f, 0.74f, 0.97f},
         20,
         {
@@ -1051,7 +1187,7 @@ static void build_track_runtime(int trk_idx) {
     MeshBuilder3D mb;
     mesh3d_init(&mb, 131072);
 
-    Vec3 asphaltCol = vec3(0.12f, 0.13f, 0.16f);
+    Vec3 asphaltCol = (trk_idx == 0) ? vec3(0.055f, 0.065f, 0.095f) : vec3(0.12f, 0.13f, 0.16f);
     Vec3 dashCol = vec3(0.95f, 0.90f, 0.30f);
     Vec3 curbRed = vec3(0.85f, 0.12f, 0.16f);
     Vec3 curbWhite = vec3(0.95f, 0.95f, 0.95f);
@@ -1164,15 +1300,44 @@ static void build_track_runtime(int trk_idx) {
             float sx = pA.x + rA.x * side * distOut;
             float sz = pA.z + rA.z * side * distOut;
 
-            if (trk_idx == 0) { /* Tokyo Skyscraper */
-                float bw = 24.0f + (float)((i * 3) % 18);
-                float bh = 45.0f + (float)((i * 13) % 95);
-                Vec3 bldgCol = vec3(0.06f, 0.09f, 0.16f);
-                mesh3d_add_box(&mb, sx, bh * 0.5f - 2.0f, sz, bw, bh, bw, bldgCol, 0.0f);
-                /* Glowing neon window strips */
-                Vec3 winCol = ((i / 4) % 2 == 0) ? vec3(0.0f, 0.94f, 1.0f) : vec3(1.0f, 0.16f, 0.52f);
-                mesh3d_add_box(&mb, sx, bh * 0.7f, sz, bw + 0.2f, 0.4f, bw + 0.2f, winCol, 1.0f);
-                mesh3d_add_box(&mb, sx, bh * 0.4f, sz, bw + 0.2f, 0.4f, bw + 0.2f, winCol, 1.0f);
+            if (trk_idx == 0) { /* Architectural Dark-Slate Tokyo Towers */
+                int bIdx = i / 4;
+                float bw = 18.0f + (float)((i * 3) % 14);
+                float bd = 14.0f + (float)((i * 5) % 12);
+                float bh = 56.0f + (float)((i * 13) % 102);
+                float slateMix = (float)(bIdx % 4) / 3.0f;
+                /* #0d1526 (0.051,0.082,0.149) -> #162238 (0.086,0.133,0.220) */
+                Vec3 bldgCol = vec3_lerp(vec3(0.051f, 0.082f, 0.149f), vec3(0.086f, 0.133f, 0.220f), slateMix);
+                Vec3 facadeCol = vec3(0.115f, 0.180f, 0.295f);
+
+                /* Primary lower architectural slab */
+                float tier1H = (bh > 86.0f) ? bh * 0.72f : bh;
+                mesh3d_add_box(&mb, sx, tier1H * 0.5f - 2.0f, sz, bw, tier1H, bd, bldgCol, 0.0f);
+
+                /* Muted architectural spandrel / window louver bands */
+                mesh3d_add_box(&mb, sx, tier1H * 0.34f, sz, bw + 0.14f, 0.75f, bd + 0.14f, facadeCol, 0.16f);
+                mesh3d_add_box(&mb, sx, tier1H * 0.62f, sz, bw + 0.14f, 0.75f, bd + 0.14f, facadeCol, 0.16f);
+
+                /* Stepped upper setback crown on taller towers */
+                float crownW = bw, crownD = bd;
+                if (bh > 86.0f) {
+                    crownW = bw * 0.68f;
+                    crownD = bd * 0.68f;
+                    float tier2H = bh - tier1H;
+                    mesh3d_add_box(&mb, sx, tier1H + tier2H * 0.5f - 2.0f, sz, crownW, tier2H, crownD, bldgCol, 0.0f);
+                }
+
+                /* Slim glowing cyan / amber / violet neon crown & vertical architectural trim */
+                int neonMode = bIdx % 3;
+                Vec3 trimCol = (neonMode == 0) ? vec3(0.00f, 0.94f, 1.00f) :
+                               (neonMode == 1) ? vec3(1.00f, 0.62f, 0.12f) :
+                                                 vec3(0.66f, 0.33f, 0.97f);
+                /* Crown parapet hairline */
+                mesh3d_add_box(&mb, sx, bh - 2.4f, sz, crownW + 0.22f, 0.34f, crownD + 0.22f, trimCol, 1.0f);
+                /* Slim vertical neon fin facing the circuit */
+                float finX = sx - rA.x * side * (bw * 0.5f + 0.08f);
+                float finZ = sz - rA.z * side * (bd * 0.5f + 0.08f);
+                mesh3d_add_box(&mb, finX, tier1H * 0.48f, finZ, 0.38f, tier1H * 0.82f, 0.38f, trimCol, 1.0f);
             } else if (trk_idx == 1) { /* Canyon Terracotta Mesa */
                 float mw = 35.0f + (float)((i * 5) % 30);
                 float mh = 25.0f + (float)((i * 9) % 45);
@@ -1432,9 +1597,9 @@ static void build_single_car_mesh(int car_idx, bool for_cockpit, GLuint *out_vbo
     Vec3 carbonCol = vec3(0.08f, 0.10f, 0.14f);
     Vec3 glassCol = vec3(0.04f, 0.07f, 0.12f);
 
-    /* 1. Sculpted Body Aerodynamic Silhouette */
+    /* 1. Sculpted Body Aerodynamic Silhouette (glow = -1.0f marks live uPaintCol surfaces) */
     /* Lower chassis body */
-    mesh3d_add_box(&mb, 0.0f, 0.30f, 0.0f, wid - 0.20f, 0.35f, spec->len, paintCol, 0.0f);
+    mesh3d_add_box(&mb, 0.0f, 0.30f, 0.0f, wid - 0.20f, 0.35f, spec->len, paintCol, -1.0f);
 
     /* Longitudinal keypoints */
     float z_cowl      = pX + spec->len * 0.20f;
@@ -1462,22 +1627,22 @@ static void build_single_car_mesh(int car_idx, bool for_cockpit, GLuint *out_vbo
     Vertex3D h_cowl_r = {  hw_cowl, y_cowl, z_cowl, 0,0,0, 0,0,0, 0 };
     Vertex3D h_nose_r = {  hw_nose, y_nose, z_nose, 0,0,0, 0,0,0, 0 };
     Vertex3D h_nose_l = { -hw_nose, y_nose, z_nose, 0,0,0, 0,0,0, 0 };
-    /* Sloped Hood Top */
-    mesh3d_add_quad_auto_norm(&mb, h_cowl_l, h_cowl_r, h_nose_r, h_nose_l, paintCol, 0.0f);
+    /* Sloped Hood Top (outward +Y normal) */
+    mesh3d_add_quad_auto_norm(&mb, h_cowl_l, h_nose_l, h_nose_r, h_cowl_r, paintCol, -1.0f);
 
-    /* Hood Side & Front Faces */
+    /* Hood Side & Front Faces (outward normals) */
     Vertex3D h_cowl_lb = { -hw_cowl, 0.35f, z_cowl, 0,0,0, 0,0,0, 0 };
     Vertex3D h_cowl_rb = {  hw_cowl, 0.35f, z_cowl, 0,0,0, 0,0,0, 0 };
     Vertex3D h_nose_rb = {  hw_nose, 0.35f, z_nose, 0,0,0, 0,0,0, 0 };
     Vertex3D h_nose_lb = { -hw_nose, 0.35f, z_nose, 0,0,0, 0,0,0, 0 };
-    mesh3d_add_quad_auto_norm(&mb, h_cowl_lb, h_cowl_l, h_nose_l, h_nose_lb, paintCol, 0.0f);
-    mesh3d_add_quad_auto_norm(&mb, h_cowl_rb, h_nose_rb, h_nose_r, h_cowl_r, paintCol, 0.0f);
-    mesh3d_add_quad_auto_norm(&mb, h_nose_lb, h_nose_l, h_nose_r, h_nose_rb, paintCol, 0.0f);
+    mesh3d_add_quad_auto_norm(&mb, h_cowl_lb, h_nose_lb, h_nose_l, h_cowl_l, paintCol, -1.0f);
+    mesh3d_add_quad_auto_norm(&mb, h_cowl_rb, h_cowl_r, h_nose_r, h_nose_rb, paintCol, -1.0f);
+    mesh3d_add_quad_auto_norm(&mb, h_nose_lb, h_nose_rb, h_nose_r, h_nose_l, paintCol, -1.0f);
 
     /* Rear Deck Lid */
     float deck_len = z_deck - z_rear_end;
     float deck_cz  = (z_deck + z_rear_end) * 0.5f;
-    mesh3d_add_box(&mb, 0.0f, (y_deck + 0.35f) * 0.5f, deck_cz, wid - 0.32f, y_deck - 0.35f, deck_len, paintCol, 0.0f);
+    mesh3d_add_box(&mb, 0.0f, (y_deck + 0.35f) * 0.5f, deck_cz, wid - 0.32f, y_deck - 0.35f, deck_len, paintCol, -1.0f);
 
     /* 2. Cockpit Canopy Glass: ONLY included when NOT in Cockpit View! */
     if (!for_cockpit) {
@@ -1496,7 +1661,7 @@ static void build_single_car_mesh(int car_idx, bool for_cockpit, GLuint *out_vbo
         mesh3d_add_quad_auto_norm(&mb, v_cowl_l, v_cowl_r, v_rf_r, v_rf_l, glassCol, 0.6f);
 
         /* 2. Tapered Roof Crown */
-        mesh3d_add_quad_auto_norm(&mb, v_rf_l, v_rf_r, v_rr_r, v_rr_l, paintCol, 0.0f);
+        mesh3d_add_quad_auto_norm(&mb, v_rf_l, v_rf_r, v_rr_r, v_rr_l, paintCol, -1.0f);
 
         /* 3. Fastback Aerodynamic Sloped Rear Window */
         mesh3d_add_quad_auto_norm(&mb, v_deck_r, v_deck_l, v_rr_l, v_rr_r, glassCol, 0.5f);
@@ -1532,9 +1697,9 @@ static void build_single_car_mesh(int car_idx, bool for_cockpit, GLuint *out_vbo
     }
 
     /* 4. Emissive Projector Headlights & LED Tail-Light Bar */
-    Vec3 hlCol = vec3(0.92f, 0.96f, 1.0f);
-    mesh3d_add_box(&mb, -wid * 0.34f, nH + 0.18f, halfL + 0.02f, 0.38f, 0.10f, 0.12f, hlCol, 1.0f);
-    mesh3d_add_box(&mb,  wid * 0.34f, nH + 0.18f, halfL + 0.02f, 0.38f, 0.10f, 0.12f, hlCol, 1.0f);
+    Vec3 hlCol = vec3(0.95f, 0.98f, 1.0f);
+    mesh3d_add_box(&mb, -wid * 0.34f, nH + 0.20f, halfL + 0.03f, 0.38f, 0.11f, 0.12f, hlCol, 0.95f);
+    mesh3d_add_box(&mb,  wid * 0.34f, nH + 0.20f, halfL + 0.03f, 0.38f, 0.11f, 0.12f, hlCol, 0.95f);
 
     Vec3 tailCol = vec3(1.0f, 0.10f, 0.20f);
     mesh3d_add_box(&mb, 0.0f, nH + 0.38f, -halfL - 0.02f, wid - 0.25f, 0.10f, 0.10f, tailCol, 1.0f);
@@ -1550,13 +1715,13 @@ static void build_single_car_mesh(int car_idx, bool for_cockpit, GLuint *out_vbo
         mesh3d_add_box(&mb, 0.0f, nH + 0.88f, -halfL + 0.12f, wid + 0.18f, 0.07f, 0.40f, carbonCol, 0.2f);
         mesh3d_add_box(&mb, -0.56f, nH + 0.68f, -halfL + 0.16f, 0.06f, 0.38f, 0.22f, carbonCol, 0.0f);
         mesh3d_add_box(&mb,  0.56f, nH + 0.68f, -halfL + 0.16f, 0.06f, 0.38f, 0.22f, carbonCol, 0.0f);
-        mesh3d_add_box(&mb, -(wid + 0.18f) * 0.5f, nH + 0.86f, -halfL + 0.12f, 0.04f, 0.24f, 0.44f, paintCol, 0.0f);
-        mesh3d_add_box(&mb,  (wid + 0.18f) * 0.5f, nH + 0.86f, -halfL + 0.12f, 0.04f, 0.24f, 0.44f, paintCol, 0.0f);
+        mesh3d_add_box(&mb, -(wid + 0.18f) * 0.5f, nH + 0.86f, -halfL + 0.12f, 0.04f, 0.24f, 0.44f, paintCol, -1.0f);
+        mesh3d_add_box(&mb,  (wid + 0.18f) * 0.5f, nH + 0.86f, -halfL + 0.12f, 0.04f, 0.24f, 0.44f, paintCol, -1.0f);
     } else if (wing == 1) { /* Ducktail Lip */
-        mesh3d_add_box(&mb, 0.0f, nH + 0.54f, -halfL + 0.06f, wid - 0.18f, 0.18f, 0.22f, paintCol, 0.0f);
+        mesh3d_add_box(&mb, 0.0f, nH + 0.54f, -halfL + 0.06f, wid - 0.18f, 0.18f, 0.22f, paintCol, -1.0f);
     } else if (wing == 2) { /* Twin-Fin Cyber Blades */
-        mesh3d_add_box(&mb, -0.65f, nH + 0.70f, -halfL + 0.20f, 0.08f, 0.44f, 0.58f, paintCol, 0.0f);
-        mesh3d_add_box(&mb,  0.65f, nH + 0.70f, -halfL + 0.20f, 0.08f, 0.44f, 0.58f, paintCol, 0.0f);
+        mesh3d_add_box(&mb, -0.65f, nH + 0.70f, -halfL + 0.20f, 0.08f, 0.44f, 0.58f, paintCol, -1.0f);
+        mesh3d_add_box(&mb,  0.65f, nH + 0.70f, -halfL + 0.20f, 0.08f, 0.44f, 0.58f, paintCol, -1.0f);
         mesh3d_add_box(&mb, 0.0f, nH + 0.88f, -halfL + 0.12f, 1.35f, 0.06f, 0.25f, spec->default_glow, 1.0f);
     }
 
@@ -1719,7 +1884,7 @@ static void reset_race(void) {
         g_ai[i].is_ai = true;
         g_ai[i].is_pursuit = (g_selected_mode == 2);
         g_ai[i].car_idx = g_ai[i].is_pursuit ? 5 : (i + 1) % 6;
-        g_ai[i].paint_idx = (i + 2) % 8;
+        g_ai[i].paint_idx = g_ai[i].is_pursuit ? 7 : (i + 2) % 8;
         g_ai[i].glow_idx = (i + 1) % 7;
         g_ai[i].gear = 1;
         g_ai[i].rpm = 3000.0f;
@@ -1819,6 +1984,83 @@ static void audio_callback(void *userdata, Uint8 *stream, int len) {
  * 12. DRAWING & RENDERING (CIRCUITS, CARS, INTERIOR, MIRROR, FX & HUD)
  * ========================================================================= */
 
+static void update_racer_tail_history(Racer *r) {
+    float halfL = g_car_specs[r->car_idx].len * 0.5f;
+    float wid   = g_car_specs[r->car_idx].wid;
+    float nH    = g_car_specs[r->car_idx].nose_h;
+    float sinH  = sinf(r->heading);
+    float cosH  = cosf(r->heading);
+
+    float lx = wid * 0.5f - 0.22f;
+    float ly = nH + 0.38f;
+    float lz = -halfL - 0.04f;
+
+    Vec3 curL = vec3(r->x + cosH * (-lx) + sinH * lz, r->y + ly, r->z - sinH * (-lx) + cosH * lz);
+    Vec3 curR = vec3(r->x + cosH * ( lx) + sinH * lz, r->y + ly, r->z - sinH * ( lx) + cosH * lz);
+
+    if (r->tail_count <= 0) {
+        r->tail_history_l[0] = curL;
+        r->tail_history_r[0] = curR;
+        r->tail_count = 1;
+        return;
+    }
+
+    if (r->tail_count == 1 || vec3_dist(curL, r->tail_history_l[1]) > 0.65f) {
+        int lim = r->tail_count < 16 ? r->tail_count : 15;
+        for (int i = lim; i >= 1; i--) {
+            r->tail_history_l[i] = r->tail_history_l[i - 1];
+            r->tail_history_r[i] = r->tail_history_r[i - 1];
+        }
+        if (r->tail_count < 16) r->tail_count++;
+    }
+    r->tail_history_l[0] = curL;
+    r->tail_history_r[0] = curR;
+}
+
+static void push_single_tail_ribbon(const Vec3 *pts, int count, Vec3 col, float baseAlpha) {
+    if (count < 2) return;
+    for (int i = 0; i < count - 1; i++) {
+        Vec3 p0 = pts[i];
+        Vec3 p1 = pts[i + 1];
+        Vec3 dir = vec3_sub(p0, p1);
+        float dLen = sqrtf(dir.x * dir.x + dir.z * dir.z);
+        if (dLen < 1e-4f) continue;
+        float rx = -dir.z / dLen;
+        float rz =  dir.x / dLen;
+
+        float t0 = 1.0f - (float)i / (float)(count - 1);
+        float t1 = 1.0f - (float)(i + 1) / (float)(count - 1);
+
+        /* Outer soft additive glow + crisp bright inner core */
+        float w0 = 0.04f + 0.14f * t0;
+        float w1 = 0.04f + 0.14f * t1;
+        float a0 = baseAlpha * t0 * t0;
+        float a1 = baseAlpha * t1 * t1;
+
+        VertexFX v0 = { p0.x - rx * w0, p0.y, p0.z - rz * w0, -1.0f, 0.0f, col.x, col.y, col.z, a0 };
+        VertexFX v1 = { p0.x + rx * w0, p0.y, p0.z + rz * w0, -1.0f, 0.0f, col.x, col.y, col.z, a0 };
+        VertexFX v2 = { p1.x + rx * w1, p1.y, p1.z + rz * w1, -1.0f, 0.0f, col.x, col.y, col.z, a1 };
+        VertexFX v3 = { p1.x - rx * w1, p1.y, p1.z - rz * w1, -1.0f, 0.0f, col.x, col.y, col.z, a1 };
+        fx_push_quad(v0, v1, v2, v3);
+
+        float cw0 = 0.02f + 0.055f * t0;
+        float cw1 = 0.02f + 0.055f * t1;
+        VertexFX c0 = { p0.x - rx * cw0, p0.y + 0.01f, p0.z - rz * cw0, -1.0f, 0.0f, 1.0f, 0.92f, 0.95f, a0 * 0.95f };
+        VertexFX c1 = { p0.x + rx * cw0, p0.y + 0.01f, p0.z + rz * cw0, -1.0f, 0.0f, 1.0f, 0.92f, 0.95f, a0 * 0.95f };
+        VertexFX c2 = { p1.x + rx * cw1, p1.y + 0.01f, p1.z + rz * cw1, -1.0f, 0.0f, 1.0f, 0.92f, 0.95f, a1 * 0.95f };
+        VertexFX c3 = { p1.x - rx * cw1, p1.y + 0.01f, p1.z - rz * cw1, -1.0f, 0.0f, 1.0f, 0.92f, 0.95f, a1 * 0.95f };
+        fx_push_quad(c0, c1, c2, c3);
+    }
+}
+
+static void push_racer_tail_ribbons(const Racer *r) {
+    if (r->tail_count < 2 || fabsf(r->speed) < 8.0f) return;
+    Vec3 ribCol = r->nos_active ? vec3(0.00f, 0.94f, 1.00f) : vec3(1.00f, 0.08f, 0.20f);
+    float alpha = r->nos_active ? 0.92f : 0.78f;
+    push_single_tail_ribbon(r->tail_history_l, r->tail_count, ribCol, alpha);
+    push_single_tail_ribbon(r->tail_history_r, r->tail_count, ribCol, alpha);
+}
+
 static void render_car_mesh(const Racer *r, bool in_cockpit) {
     Mat4 mModel, mRotY, mRotX, mTrans, mTmp;
     mat4_rotate_y(mRotY, r->heading);
@@ -1828,6 +2070,9 @@ static void render_car_mesh(const Racer *r, bool in_cockpit) {
     mat4_mul(mModel, mTrans, mTmp);
 
     glUniformMatrix4fv(g_u3d_Model, 1, GL_FALSE, mModel);
+    int paintIdx = (r->paint_idx >= 0 && r->paint_idx < 8) ? r->paint_idx : 0;
+    Vec3 paintCol = g_paints[paintIdx].col;
+    glUniform3f(g_u3d_PaintCol, paintCol.x, paintCol.y, paintCol.z);
 
     GLuint vbo = in_cockpit ? g_vbo_cars_cockpit[r->car_idx] : g_vbo_cars[r->car_idx];
     int count  = in_cockpit ? g_car_cockpit_vert_counts[r->car_idx] : g_car_vert_counts[r->car_idx];
@@ -1914,6 +2159,8 @@ static void render_car_mesh(const Racer *r, bool in_cockpit) {
 }
 
 static void render_world_scene(int trk_idx, const Mat4 mView, const Mat4 mProj, Vec3 camPos, bool isCockpitView) {
+    render_sky_gradient(trk_idx);
+
     Mat4 mMVP, mIdent;
     mat4_identity(mIdent);
     mat4_mul(mMVP, mProj, mView);
@@ -1925,6 +2172,7 @@ static void render_world_scene(int trk_idx, const Mat4 mView, const Mat4 mProj, 
     glUniformMatrix4fv(g_u3d_MVP, 1, GL_FALSE, mMVP);
     glUniformMatrix4fv(g_u3d_Model, 1, GL_FALSE, mIdent);
     glUniform3f(g_u3d_CamPos, camPos.x, camPos.y, camPos.z);
+    glUniform3f(g_u3d_PaintCol, 1.0f, 1.0f, 1.0f);
     glUniform3f(g_u3d_SunDir, 0.45f, 0.75f, 0.45f);
     glUniform3f(g_u3d_SunCol, ts->sun_col.x, ts->sun_col.y, ts->sun_col.z);
     glUniform3f(g_u3d_AmbientCol, ts->ambient_col.x, ts->ambient_col.y, ts->ambient_col.z);
@@ -1973,6 +2221,15 @@ static void render_world_scene(int trk_idx, const Mat4 mView, const Mat4 mProj, 
         }
     }
 
+    if (g_state == STATE_TITLE || g_state == STATE_RACING) {
+        for (int i = 0; i < g_ai_count; i++) {
+            push_racer_tail_ribbons(&g_ai[i]);
+        }
+        if (!isCockpitView) {
+            push_racer_tail_ribbons(&g_player);
+        }
+    }
+
     /* Falling Rain FX (on Tokyo Track) */
     if (trk_idx == 0) {
         for (int r = 0; r < 120; r++) {
@@ -1991,9 +2248,11 @@ static void render_world_scene(int trk_idx, const Mat4 mView, const Mat4 mProj, 
 }
 
 static void draw_hud_tachometer(float cx, float cy, float r, float rpm, int gear, bool manual, float mph, float n2o, bool nosActive, bool inCountdown) {
-    (void)nosActive;
-    /* Dark Tachometer Backplate */
-    hud_pill(cx - r - 15.0f, cy - r - 15.0f, (r + 15.0f) * 2.0f, (r + 15.0f) * 2.0f, 0.0f, vec4(0.04f, 0.06f, 0.10f, 0.88f));
+    /* Dark Obsidian-Navy Tachometer Card */
+    Vec4 borderCol = nosActive ? vec4(0.0f, 0.94f, 1.0f, 0.70f) : vec4(0.22f, 0.74f, 0.97f, 0.32f);
+    Vec4 topCol = nosActive ? vec4(0.0f, 0.94f, 1.0f, 0.95f) : vec4(1.0f, 0.16f, 0.52f, 0.85f);
+    hud_card(cx - r - 18.0f, cy - r - 18.0f, (r + 18.0f) * 2.0f, (r + 18.0f) * 2.0f, 0.0f,
+             vec4(0.024f, 0.039f, 0.078f, 0.90f), borderCol, topCol);
 
     /* RPM Gauge Arc (140 deg to 380 deg) */
     int segs = 36;
@@ -2070,7 +2329,9 @@ static void draw_hud_tachometer(float cx, float cy, float r, float rpm, int gear
         float f1 = (float)(i + 1) / 16.0f;
         float a0 = nStart + f0 * (nEnd - nStart);
         float a1 = nStart + f1 * (nEnd - nStart);
-        Vec4 col = (f1 <= nNorm) ? vec4(0.0f, 0.94f, 1.0f, 1.0f) : vec4(0.2f, 0.25f, 0.35f, 0.35f);
+        Vec4 col = (f1 <= nNorm)
+            ? (nosActive ? vec4(0.55f, 0.98f, 1.0f, 1.0f) : vec4(0.0f, 0.94f, 1.0f, 1.0f))
+            : vec4(0.16f, 0.22f, 0.34f, 0.35f);
 
         float x0 = cx + cosf(a0) * (r + 10.0f), y0 = cy + sinf(a0) * (r + 10.0f);
         float x1 = cx + cosf(a1) * (r + 10.0f), y1 = cy + sinf(a1) * (r + 10.0f);
@@ -2084,11 +2345,36 @@ static void draw_hud_tachometer(float cx, float cy, float r, float rpm, int gear
         hud_push_v(v0); hud_push_v(v1); hud_push_v(v2);
         hud_push_v(v0); hud_push_v(v2); hud_push_v(v3);
     }
-    hud_text(cx + 26.0f, cy + 68.0f, 1.2f, "N2O", vec4(0.0f, 0.94f, 1.0f, 1.0f));
+    hud_text(cx + 24.0f, cy + 68.0f, 1.2f, nosActive ? "N2O!" : "N2O",
+             nosActive ? vec4(0.55f, 0.98f, 1.0f, 1.0f) : vec4(0.0f, 0.94f, 1.0f, 1.0f));
 }
 
 static void draw_hud_minimap(float mx, float my, float size, int trk_idx) {
-    hud_pill(mx - 8.0f, my - 8.0f, size + 16.0f, size + 16.0f, 0.0f, vec4(0.04f, 0.07f, 0.12f, 0.85f));
+    /* Dark-Mode Neon Scramble Obsidian-Navy Tactical Card */
+    float cardX = mx - 12.0f;
+    float cardY = my - 26.0f;
+    float cardW = size + 24.0f;
+    float cardH = size + 36.0f;
+    hud_card(cardX, cardY, cardW, cardH, 0.0f,
+             vec4(0.024f, 0.039f, 0.078f, 0.90f),
+             vec4(0.22f, 0.74f, 0.97f, 0.36f),
+             vec4(0.0f, 0.94f, 1.0f, 0.90f));
+    hud_text(mx - 2.0f, my - 18.0f, 1.15f, "TAC-MAP", vec4(0.0f, 0.94f, 1.0f, 0.95f));
+    hud_text(mx + size - 56.0f, my - 18.0f, 1.05f, "GPS LIVE", vec4(0.18f, 0.95f, 0.60f, 0.85f));
+    hud_rect(mx - 4.0f, my - 4.0f, size + 8.0f, size + 8.0f, vec4(0.014f, 0.024f, 0.051f, 0.85f));
+
+    /* Faint Coordinate Grid Lines inside Tactical Minimap */
+    Vec4 gridCol = vec4(0.22f, 0.74f, 0.97f, 0.11f);
+    for (int g = 1; g <= 3; g++) {
+        float t = (float)g * 0.25f;
+        hud_line(mx + size * t, my, mx + size * t, my + size, 1.0f, gridCol);
+        hud_line(mx, my + size * t, mx + size, my + size * t, 1.0f, gridCol);
+    }
+
+    /* Emerald & Amber Cross-Transit Accents */
+    hud_line(mx + 4.0f, my + size * 0.32f, mx + size - 4.0f, my + size * 0.64f, 1.4f, vec4(0.06f, 0.72f, 0.51f, 0.26f));
+    hud_line(mx + size * 0.28f, my + 4.0f, mx + size * 0.74f, my + size - 4.0f, 1.4f, vec4(0.96f, 0.62f, 0.04f, 0.26f));
+
     const TrackRuntime *tr = &g_tracks[trk_idx];
 
     /* Find Track Bounds */
@@ -2105,41 +2391,82 @@ static void draw_hud_minimap(float mx, float my, float size, int trk_idx) {
     float ox = mx + (size - (maxX - minX) * scale) * 0.5f - minX * scale;
     float oz = my + (size - (maxZ - minZ) * scale) * 0.5f - minZ * scale;
 
-    /* Circuit Trace */
+    /* Pass 1: Dark Road Casing */
+    Vec4 casingCol = vec4(0.02f, 0.04f, 0.08f, 0.96f);
     for (int i = 0; i < FRAMES_COUNT; i += 4) {
-        float px = tr->pts[i].x * scale + ox;
-        float pz = tr->pts[i].z * scale + oz;
-        hud_rect(px - 1.5f, pz - 1.5f, 3.0f, 3.0f, vec4(0.0f, 0.94f, 1.0f, 0.65f));
+        int ni = (i + 4) % FRAMES_COUNT;
+        float x0 = tr->pts[i].x * scale + ox,  y0 = tr->pts[i].z * scale + oz;
+        float x1 = tr->pts[ni].x * scale + ox, y1 = tr->pts[ni].z * scale + oz;
+        hud_line(x0, y0, x1, y1, 6.8f, casingCol);
     }
-    /* Start / Finish Tick */
+
+    /* Pass 2: Bright Cyan Route Loop */
+    Vec4 routeCol = vec4(0.0f, 0.94f, 1.0f, 0.92f);
+    for (int i = 0; i < FRAMES_COUNT; i += 4) {
+        int ni = (i + 4) % FRAMES_COUNT;
+        float x0 = tr->pts[i].x * scale + ox,  y0 = tr->pts[i].z * scale + oz;
+        float x1 = tr->pts[ni].x * scale + ox, y1 = tr->pts[ni].z * scale + oz;
+        hud_line(x0, y0, x1, y1, 2.6f, routeCol);
+    }
+
+    /* Emerald / Amber Sector Transit Nodes */
+    int s1 = FRAMES_COUNT / 3;
+    int s2 = (FRAMES_COUNT * 2) / 3;
+    hud_rect(tr->pts[s1].x * scale + ox - 3.0f, tr->pts[s1].z * scale + oz - 3.0f, 6.0f, 6.0f, vec4(0.06f, 0.85f, 0.55f, 0.95f));
+    hud_rect(tr->pts[s2].x * scale + ox - 3.0f, tr->pts[s2].z * scale + oz - 3.0f, 6.0f, 6.0f, vec4(0.96f, 0.62f, 0.04f, 0.95f));
+
+    /* Start / Finish Gate Bar */
     float sfx = tr->pts[0].x * scale + ox;
     float sfz = tr->pts[0].z * scale + oz;
-    hud_rect(sfx - 3.0f, sfz - 3.0f, 6.0f, 6.0f, vec4(1.0f, 1.0f, 1.0f, 1.0f));
+    float srx = tr->rights[0].x * 5.5f;
+    float srz = tr->rights[0].z * 5.5f;
+    hud_line(sfx - srx, sfz - srz, sfx + srx, sfz + srz, 3.0f, vec4(1.0f, 1.0f, 1.0f, 1.0f));
 
-    /* AI Dots */
+    /* AI Markers */
     for (int i = 0; i < g_ai_count; i++) {
         float ax = g_ai[i].x * scale + ox;
         float az = g_ai[i].z * scale + oz;
-        Vec4 aiCol = g_ai[i].is_pursuit ? vec4(1.0f, 0.16f, 0.52f, 1.0f) : vec4(1.0f, 0.82f, 0.20f, 1.0f);
-        hud_rect(ax - 3.0f, az - 3.0f, 6.0f, 6.0f, aiCol);
+        Vec4 aiCol = g_ai[i].is_pursuit ? vec4(1.0f, 0.16f, 0.52f, 1.0f) : vec4(0.96f, 0.68f, 0.12f, 1.0f);
+        hud_rect(ax - 3.5f, az - 3.5f, 7.0f, 7.0f, vec4(0.02f, 0.04f, 0.08f, 0.95f));
+        hud_rect(ax - 2.5f, az - 2.5f, 5.0f, 5.0f, aiCol);
     }
 
-    /* Player Dot */
+    /* Directional Player Chevron */
     float plx = g_player.x * scale + ox;
     float plz = g_player.z * scale + oz;
-    hud_rect(plx - 4.5f, plz - 4.5f, 9.0f, 9.0f, vec4(0.29f, 0.87f, 0.50f, 1.0f));
+    float fx = sinf(g_player.heading);
+    float fy = cosf(g_player.heading);
+    float rx = -fy;
+    float ry = fx;
+
+    Vec4 chevOutline = vec4(0.02f, 0.04f, 0.08f, 0.98f);
+    Vec4 chevFill = g_player.nos_active ? vec4(0.0f, 0.96f, 1.0f, 1.0f) : vec4(0.18f, 0.95f, 0.60f, 1.0f);
+
+    for (int pass = 0; pass < 2; pass++) {
+        float sc = (pass == 0) ? 1.35f : 1.0f;
+        Vec4 c = (pass == 0) ? chevOutline : chevFill;
+        VertexHUD tip   = { plx + fx * (8.0f * sc), plz + fy * (8.0f * sc), 0, 0, c.x, c.y, c.z, c.w, 0 };
+        VertexHUD left  = { plx - fx * (5.0f * sc) - rx * (5.5f * sc), plz - fy * (5.0f * sc) - ry * (5.5f * sc), 0, 0, c.x, c.y, c.z, c.w, 0 };
+        VertexHUD notch = { plx - fx * (2.2f * sc), plz - fy * (2.2f * sc), 0, 0, c.x, c.y, c.z, c.w, 0 };
+        VertexHUD right = { plx - fx * (5.0f * sc) + rx * (5.5f * sc), plz - fy * (5.0f * sc) + ry * (5.5f * sc), 0, 0, c.x, c.y, c.z, c.w, 0 };
+        hud_push_v(tip); hud_push_v(left); hud_push_v(notch);
+        hud_push_v(tip); hud_push_v(notch); hud_push_v(right);
+    }
 }
 
 static void draw_hud_mirror_frame(void) {
     /* Scissor area is x=500, y=636, w=280, h=68 in bottom-up GL coords.
      * In top-down HUD coords (1280x720), y = 720 - (636 + 68) = 16. */
     float fx = 496.0f, fy = 12.0f, fw = 288.0f, fh = 76.0f;
-    /* Outer Bezel */
-    hud_rect(fx, fy, fw, 4.0f, vec4(0.75f, 0.80f, 0.88f, 0.95f));
-    hud_rect(fx, fy + fh - 4.0f, fw, 4.0f, vec4(0.0f, 0.94f, 1.0f, 0.95f));
-    hud_rect(fx, fy, 4.0f, fh, vec4(0.75f, 0.80f, 0.88f, 0.95f));
-    hud_rect(fx + fw - 4.0f, fy, 4.0f, fh, vec4(0.75f, 0.80f, 0.88f, 0.95f));
-    hud_text(504.0f, fy + fh - 14.0f, 1.0f, "REAR-VIEW MIRROR", vec4(0.0f, 0.94f, 1.0f, 0.85f));
+    /* Sleek Dark Obsidian-Navy Bezel */
+    Vec4 bezelCol = vec4(0.06f, 0.10f, 0.18f, 0.95f);
+    Vec4 trimCol  = vec4(0.0f, 0.94f, 1.0f, 0.80f);
+    hud_rect(fx, fy, fw, 3.0f, trimCol);
+    hud_rect(fx, fy + fh - 3.0f, fw, 3.0f, bezelCol);
+    hud_rect(fx, fy, 3.0f, fh, bezelCol);
+    hud_rect(fx + fw - 3.0f, fy, 3.0f, fh, bezelCol);
+    hud_rect(fx + 4.0f, fy + fh - 17.0f, 138.0f, 14.0f, vec4(0.024f, 0.039f, 0.078f, 0.88f));
+    hud_text(fx + 8.0f, fy + fh - 14.0f, 1.0f, "REAR-VIEW MIRROR", vec4(0.0f, 0.94f, 1.0f, 0.92f));
 }
 
 /* =========================================================================
@@ -2199,6 +2526,39 @@ static void update_physics(float dt, const uint8_t *keys) {
             } else {
                 g_player.speed = 28.0f;
             }
+        }
+        return;
+    }
+
+    if (g_state == STATE_TITLE) {
+        g_race_time += dt;
+        g_player.speed = 96.0f;
+        g_player.nos_active = (fmodf(g_race_time, 5.0f) > 3.2f);
+        float pDist = g_player.speed * dt * 0.447f;
+        g_player.u += pDist / tr->total_len;
+        if (g_player.u >= 1.0f) g_player.u -= 1.0f;
+        int pSeg = (int)(g_player.u * (float)FRAMES_COUNT) % FRAMES_COUNT;
+        g_player.seg_idx = pSeg;
+        g_player.x = tr->pts[pSeg].x + tr->rights[pSeg].x * g_player.lat;
+        g_player.y = tr->pts[pSeg].y;
+        g_player.z = tr->pts[pSeg].z + tr->rights[pSeg].z * g_player.lat;
+        g_player.heading = atan2f(tr->tangents[pSeg].x, tr->tangents[pSeg].z);
+        update_racer_tail_history(&g_player);
+
+        for (int i = 0; i < g_ai_count; i++) {
+            g_ai[i].speed += (g_ai[i].ai_target_speed - g_ai[i].speed) * dt * 0.8f;
+            g_ai[i].nos_active = ((i % 2 == 0) && fmodf(g_race_time + (float)i * 1.1f, 4.5f) < 1.6f);
+            float aiDist = g_ai[i].speed * dt * 0.447f;
+            g_ai[i].u += aiDist / tr->total_len;
+            if (g_ai[i].u >= 1.0f) g_ai[i].u -= 1.0f;
+
+            int ai_seg = (int)(g_ai[i].u * (float)FRAMES_COUNT) % FRAMES_COUNT;
+            g_ai[i].seg_idx = ai_seg;
+            g_ai[i].x = tr->pts[ai_seg].x + tr->rights[ai_seg].x * g_ai[i].lat;
+            g_ai[i].y = tr->pts[ai_seg].y;
+            g_ai[i].z = tr->pts[ai_seg].z + tr->rights[ai_seg].z * g_ai[i].lat;
+            g_ai[i].heading = atan2f(tr->tangents[ai_seg].x, tr->tangents[ai_seg].z);
+            update_racer_tail_history(&g_ai[i]);
         }
         return;
     }
@@ -2327,9 +2687,13 @@ static void update_physics(float dt, const uint8_t *keys) {
     g_audio_rpm_norm = g_player.rpm / 9000.0f;
     g_audio_nos = g_player.nos_active;
 
+    /* Update Player Tail-Light History */
+    update_racer_tail_history(&g_player);
+
     /* Update AI rivals */
     for (int i = 0; i < g_ai_count; i++) {
         g_ai[i].speed += (g_ai[i].ai_target_speed - g_ai[i].speed) * dt * 0.8f;
+        g_ai[i].nos_active = ((i % 3 == 0) && fmodf(g_race_time + (float)i, 5.5f) < 1.4f);
         float aiDist = g_ai[i].speed * dt * 0.447f;
         g_ai[i].u += aiDist / tr->total_len;
         if (g_ai[i].u >= 1.0f) {
@@ -2343,6 +2707,7 @@ static void update_physics(float dt, const uint8_t *keys) {
         g_ai[i].y = tr->pts[ai_seg].y;
         g_ai[i].z = tr->pts[ai_seg].z + tr->rights[ai_seg].z * g_ai[i].lat;
         g_ai[i].heading = atan2f(tr->tangents[ai_seg].x, tr->tangents[ai_seg].z);
+        update_racer_tail_history(&g_ai[i]);
     }
 }
 
@@ -2359,8 +2724,12 @@ static void render_scene(int trk_idx) {
         mat4_identity(mIdent);
         mat4_perspective(mProj, 0.95f, 1280.0f / 720.0f, 0.1f, 300.0f);
 
-        Vec3 eye = vec3(sinf(g_garage_orbit_yaw) * 6.5f - 0.55f, 1.48f, cosf(g_garage_orbit_yaw) * 6.5f);
-        Vec3 target = vec3(-0.78f, 0.72f, 0.0f);
+        float camRightX = cosf(g_garage_orbit_yaw);
+        float camRightZ = -sinf(g_garage_orbit_yaw);
+        float frameShift = -1.60f; /* Keep car centered in open right viewport clear of HUD card */
+        Vec3 eye = vec3(sinf(g_garage_orbit_yaw) * 6.8f + camRightX * frameShift, 1.55f,
+                        cosf(g_garage_orbit_yaw) * 6.8f + camRightZ * frameShift);
+        Vec3 target = vec3(camRightX * frameShift, 0.72f, camRightZ * frameShift);
         Vec3 up = vec3(0.0f, 1.0f, 0.0f);
         mat4_lookat(mView, eye, target, up);
         mat4_mul(mMVP, mProj, mView);
@@ -2369,10 +2738,11 @@ static void render_scene(int trk_idx) {
         glUniformMatrix4fv(g_u3d_MVP, 1, GL_FALSE, mMVP);
         glUniformMatrix4fv(g_u3d_Model, 1, GL_FALSE, mIdent);
         glUniform3f(g_u3d_CamPos, eye.x, eye.y, eye.z);
+        glUniform3f(g_u3d_PaintCol, 1.0f, 1.0f, 1.0f);
         glUniform3f(g_u3d_SunDir, 0.45f, 0.75f, 0.45f);
         glUniform3f(g_u3d_SunCol, 0.85f, 0.95f, 1.0f);
         glUniform3f(g_u3d_AmbientCol, 0.35f, 0.45f, 0.65f);
-        glUniform3f(g_u3d_FogCol, 0.05f, 0.08f, 0.15f);
+        glUniform3f(g_u3d_FogCol, 0.03f, 0.05f, 0.11f);
         glUniform1f(g_u3d_FogDensity, 0.005f);
 
         glEnable(GL_DEPTH_TEST);
@@ -2403,17 +2773,32 @@ static void render_scene(int trk_idx) {
         showCar.heading = g_garage_orbit_yaw * 0.5f;
         render_car_mesh(&showCar, false);
 
-        /* Speedshop Customization HUD */
-        hud_pill(36.0f, 40.0f, 520.0f, 620.0f, 12.0f, vec4(0.04f, 0.07f, 0.12f, 0.90f));
-        hud_text(60.0f, 65.0f, 2.5f, "TUNER SPEEDSHOP", vec4(0.0f, 0.94f, 1.0f, 1.0f));
-        hud_text(60.0f, 98.0f, 1.2f, "CUSTOMIZE YOUR RETRO SUPERCAR", vec4(0.75f, 0.85f, 0.95f, 0.85f));
+        if (g_glows[g_selected_glow].active) {
+            Vec3 gCol = g_glows[g_selected_glow].col;
+            fx_push_radial_glow(vec3(0.0f, 0.06f, 0.0f), 2.3f, 3.4f, vec4(gCol.x, gCol.y, gCol.z, 0.50f));
+            flush_fx(mMVP);
+        }
+
+        /* Speedshop Customization HUD (Dark-Mode Neon Scramble Card) */
+        hud_card(36.0f, 40.0f, 520.0f, 620.0f, 10.0f,
+                 vec4(0.024f, 0.039f, 0.078f, 0.90f),
+                 vec4(0.22f, 0.74f, 0.97f, 0.36f),
+                 vec4(0.0f, 0.94f, 1.0f, 0.95f));
+        hud_text(60.0f, 62.0f, 2.4f, "TUNER SPEEDSHOP", vec4(0.0f, 0.94f, 1.0f, 1.0f));
+        char specTag[64];
+        snprintf(specTag, sizeof(specTag), "%s  //  CLASS %s",
+                 g_car_specs[g_selected_car].cls, g_car_specs[g_selected_car].rating);
+        hud_text(60.0f, 95.0f, 1.15f, specTag, vec4(0.70f, 0.82f, 0.95f, 0.88f));
 
         char line[64];
         for (int r = 0; r < 8; r++) {
-            float ry = 142.0f + (float)r * 45.0f;
+            float ry = 136.0f + (float)r * 45.0f;
             bool sel = (r == g_garage_row);
             if (sel) {
-                hud_pill(50.0f, ry - 6.0f, 490.0f, 38.0f, 6.0f, vec4(0.0f, 0.94f, 1.0f, 0.28f));
+                hud_card(50.0f, ry - 6.0f, 490.0f, 38.0f, 6.0f,
+                         vec4(0.0f, 0.94f, 1.0f, 0.20f),
+                         vec4(0.0f, 0.94f, 1.0f, 0.65f),
+                         vec4(0.0f, 0.0f, 0.0f, 0.0f));
             }
             const char *prefix = sel ? "> " : "  ";
             Vec4 textCol = sel ? vec4(0.0f, 0.94f, 1.0f, 1.0f) : vec4(0.85f, 0.90f, 0.96f, 0.85f);
@@ -2429,11 +2814,18 @@ static void render_scene(int trk_idx) {
                 case 7: snprintf(line, sizeof(line), "%s8. MODE:      < %s >", prefix, g_mode_specs[g_selected_mode].name); break;
             }
             hud_text(60.0f, ry, 1.35f, line, textCol);
+            if (r == 1) {
+                Vec3 pc = g_paints[g_selected_paint].col;
+                hud_rect(512.0f, ry + 2.0f, 18.0f, 14.0f, vec4(pc.x, pc.y, pc.z, 1.0f));
+            }
         }
 
-        hud_pill(50.0f, 515.0f, 490.0f, 48.0f, 8.0f, vec4(0.0f, 0.94f, 1.0f, 0.25f));
-        hud_text(130.0f, 530.0f, 1.6f, "[ENTER / SPACE] START RACE", vec4(0.0f, 0.94f, 1.0f, 1.0f));
-        hud_text(55.0f, 580.0f, 1.15f, "[UP/DOWN] ROW   [LEFT/RIGHT] CYCLE   [1-8] SELECT   [ESC] TITLE", vec4(0.75f, 0.85f, 0.95f, 0.85f));
+        hud_card(50.0f, 512.0f, 490.0f, 48.0f, 8.0f,
+                 vec4(0.0f, 0.94f, 1.0f, 0.22f),
+                 vec4(0.0f, 0.94f, 1.0f, 0.72f),
+                 vec4(0.0f, 0.0f, 0.0f, 0.0f));
+        hud_text(130.0f, 528.0f, 1.6f, "[ENTER / SPACE] START RACE", vec4(0.0f, 0.94f, 1.0f, 1.0f));
+        hud_text(55.0f, 582.0f, 1.15f, "[UP/DOWN] ROW   [LEFT/RIGHT] CYCLE   [1-8] SELECT   [ESC] TITLE", vec4(0.75f, 0.85f, 0.95f, 0.85f));
 
         flush_hud();
         return;
@@ -2498,10 +2890,13 @@ static void render_scene(int trk_idx) {
 
     /* 3. 2D HUD Overlays Pass */
     if (g_state == STATE_TITLE) {
-        /* Title Screen Attract Mode HUD */
-        hud_pill(40.0f, 40.0f, 460.0f, 640.0f, 14.0f, vec4(0.04f, 0.07f, 0.12f, 0.88f));
+        /* Title Screen Attract Mode HUD (Dark-Mode Neon Scramble Card) */
+        hud_card(40.0f, 40.0f, 460.0f, 640.0f, 12.0f,
+                 vec4(0.024f, 0.039f, 0.078f, 0.88f),
+                 vec4(0.22f, 0.74f, 0.97f, 0.36f),
+                 vec4(0.0f, 0.94f, 1.0f, 0.95f));
         hud_text(65.0f, 75.0f, 3.2f, "APEX NITRO 3D", vec4(0.0f, 0.94f, 1.0f, 1.0f));
-        hud_text(65.0f, 115.0f, 1.2f, "GLES2 RETROPIE EDITION - 60 FPS", vec4(1.0f, 0.16f, 0.52f, 1.0f));
+        hud_text(65.0f, 115.0f, 1.15f, "NEON SCRAMBLE // RETROPIE GLES2", vec4(1.0f, 0.16f, 0.52f, 1.0f));
 
         /* Menu Options with dynamic row highlight */
         static const char *title_items[4] = {
@@ -2513,9 +2908,13 @@ static void render_scene(int trk_idx) {
         for (int r = 0; r < 4; r++) {
             float py = 180.0f + (float)r * 70.0f;
             bool sel = (r == g_title_row);
-            Vec4 pCol = sel ? vec4(0.0f, 0.94f, 1.0f, 0.35f) : vec4(0.12f, 0.16f, 0.23f, 0.85f);
-            Vec4 tCol = sel ? vec4(1.0f, 1.0f, 1.0f, 1.0f) : vec4(0.80f, 0.85f, 0.90f, 0.90f);
-            hud_pill(65.0f, py, 380.0f, 52.0f, 8.0f, pCol);
+            Vec4 pCol = sel ? vec4(0.0f, 0.94f, 1.0f, 0.24f) : vec4(0.055f, 0.086f, 0.155f, 0.88f);
+            Vec4 bCol = sel ? vec4(0.0f, 0.94f, 1.0f, 0.78f) : vec4(0.22f, 0.74f, 0.97f, 0.20f);
+            Vec4 tCol = sel ? vec4(1.0f, 1.0f, 1.0f, 1.0f) : vec4(0.80f, 0.86f, 0.94f, 0.90f);
+            hud_card(65.0f, py, 380.0f, 52.0f, 8.0f, pCol, bCol, vec4(0.0f, 0.0f, 0.0f, 0.0f));
+            if (sel) {
+                hud_pill(68.0f, py + 6.0f, 4.0f, 40.0f, 5.0f, vec4(0.0f, 0.94f, 1.0f, 1.0f));
+            }
             hud_text(90.0f, py + 16.0f, 1.8f, title_items[r], tCol);
         }
 
@@ -2524,12 +2923,18 @@ static void render_scene(int trk_idx) {
         hud_text(65.0f, 550.0f, 1.2f, "[RIGHT SHIFT + ENTER] QUIT TO RETROPIE", vec4(1.0f, 0.45f, 0.45f, 0.95f));
 
         /* Top-Right Live Street Cam badge */
-        hud_pill(960.0f, 30.0f, 280.0f, 38.0f, 6.0f, vec4(0.04f, 0.07f, 0.12f, 0.85f));
+        hud_card(960.0f, 30.0f, 280.0f, 38.0f, 6.0f,
+                 vec4(0.024f, 0.039f, 0.078f, 0.88f),
+                 vec4(0.22f, 0.74f, 0.97f, 0.36f),
+                 vec4(0.0f, 0.0f, 0.0f, 0.0f));
         hud_rect(980.0f, 44.0f, 10.0f, 10.0f, vec4(1.0f, 0.16f, 0.2f, 1.0f));
         hud_text(1005.0f, 42.0f, 1.4f, "LIVE STREET CAM", vec4(0.0f, 0.94f, 1.0f, 1.0f));
     } else if (g_state == STATE_RESULTS) {
         /* Finish Card Overlay */
-        hud_pill(300.0f, 100.0f, 680.0f, 520.0f, 16.0f, vec4(0.04f, 0.07f, 0.12f, 0.92f));
+        hud_card(300.0f, 100.0f, 680.0f, 520.0f, 14.0f,
+                 vec4(0.024f, 0.039f, 0.078f, 0.92f),
+                 vec4(0.22f, 0.74f, 0.97f, 0.42f),
+                 vec4(0.0f, 0.94f, 1.0f, 0.95f));
 
         if (g_final_rank == 1) {
             hud_text(495.0f, 140.0f, 3.2f, "VICTORY!", vec4(0.98f, 0.80f, 0.08f, 1.0f));
@@ -2586,7 +2991,10 @@ static void render_scene(int trk_idx) {
         g_final_rank = live_rank;
 
         /* Top-Left Race Stats Card */
-        hud_pill(36.0f, 20.0f, 335.0f, 80.0f, 8.0f, vec4(0.04f, 0.07f, 0.12f, 0.85f));
+        hud_card(36.0f, 20.0f, 340.0f, 80.0f, 8.0f,
+                 vec4(0.024f, 0.039f, 0.078f, 0.88f),
+                 vec4(0.22f, 0.74f, 0.97f, 0.36f),
+                 vec4(0.0f, 0.94f, 1.0f, 0.90f));
         char rankStr[32];
         static const char *ords[] = { "1ST", "2ND", "3RD", "4TH", "5TH", "6TH" };
         int rIdx = (live_rank >= 1 && live_rank <= 6) ? live_rank - 1 : 0;
@@ -2605,7 +3013,10 @@ static void render_scene(int trk_idx) {
         hud_text(55.0f, 68.0f, 1.3f, timeStr, vec4(0.85f, 0.90f, 0.98f, 1.0f));
 
         /* Top-Right Style Score Card */
-        hud_pill(960.0f, 20.0f, 280.0f, 65.0f, 8.0f, vec4(0.04f, 0.07f, 0.12f, 0.85f));
+        hud_card(960.0f, 20.0f, 280.0f, 65.0f, 8.0f,
+                 vec4(0.024f, 0.039f, 0.078f, 0.88f),
+                 vec4(0.22f, 0.74f, 0.97f, 0.36f),
+                 vec4(1.0f, 0.16f, 0.52f, 0.90f));
         char styleStr[32];
         snprintf(styleStr, sizeof(styleStr), "STYLE: %d PTS", g_total_style_score);
         hud_text(980.0f, 34.0f, 1.4f, styleStr, vec4(0.0f, 0.94f, 1.0f, 1.0f));
@@ -2724,8 +3135,13 @@ static int run_headless(const char *bench_flag, const char *shot_spec) {
     if (shot_spec) {
         char mode[32], out_path[256];
         if (sscanf(shot_spec, "%31[^:]:%255s", mode, out_path) == 2) {
+            uint8_t dummy_keys[SDL_NUM_SCANCODES];
+            memset(dummy_keys, 0, sizeof(dummy_keys));
             if (strcmp(mode, "title") == 0) {
                 g_state = STATE_TITLE;
+                for (int f = 0; f < 30; f++) {
+                    update_physics(0.02f, dummy_keys);
+                }
                 render_scene(0);
             } else if (strcmp(mode, "garage") == 0) {
                 g_state = STATE_GARAGE;
@@ -2733,9 +3149,15 @@ static int run_headless(const char *bench_flag, const char *shot_spec) {
             } else if (strcmp(mode, "chase") == 0) {
                 g_state = STATE_RACING;
                 g_cam_mode = 0; /* Chase */
+                dummy_keys[SDL_SCANCODE_W] = 1;
+                dummy_keys[SDL_SCANCODE_SPACE] = 1;
+                for (int f = 0; f < 28; f++) {
+                    update_physics(0.02f, dummy_keys);
+                }
                 g_player.speed = 124.0f;
                 g_player.rpm = 7400.0f;
                 g_player.gear = 4;
+                g_player.nos_active = true;
                 render_scene(0);
             } else if (strcmp(mode, "cockpit") == 0) {
                 g_state = STATE_RACING;
